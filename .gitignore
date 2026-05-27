@@ -1,0 +1,7 @@
+.state/
+archive/
+reports/
+__pycache__/
+*.pyc
+config.json
+run-report-*.xlsx

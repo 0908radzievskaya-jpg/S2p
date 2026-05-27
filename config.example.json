@@ -1,0 +1,22 @@
+{
+  "output_root": "archive",
+  "report_root": "reports",
+  "state_dir": ".state",
+  "bootstrap_skip_existing": true,
+  "download_timeout_seconds": 30,
+  "link_follow_depth": 2,
+  "max_downloaded_files_per_link": 20,
+  "imap_timeout_seconds": 20,
+  "user_agent": "mail-intake-automation/1.0",
+  "mailboxes": [
+    {
+      "name": "example-inbox",
+      "host": "imap.example.com",
+      "port": 993,
+      "username": "user@example.com",
+      "password": "replace-me",
+      "folder": "INBOX",
+      "use_ssl": true
+    }
+  ]
+}
