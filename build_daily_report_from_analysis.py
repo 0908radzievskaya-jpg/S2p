@@ -23,26 +23,26 @@ def item_from_analysis(path: Path) -> ma.ProcessedMessage:
     downloaded_files = [str(x) for x in payload.get("downloaded_files", [])]
     subject = str(payload.get("subject", ""))
     sender = str(payload.get("sender", ""))
+    fallback_field_text = "\n".join(
+        str(fields.get(key, ""))
+        for key in ("requirements", "constraints", "tech_params", "volumes")
+    )
     fallback_text = "\n".join([
         subject,
         sender,
-        "\n".join(str(value) for value in fields.values()),
-        "\n".join(str(x) for x in payload.get("sections", [])),
+        fallback_field_text,
     ])
-    if "is_relevant" not in fields or fields.get("is_relevant") not in {"yes", "no"}:
-        is_relevant, relevance_reason = ma.assess_design_request_relevance(
-            subject,
-            sender,
-            fallback_text,
-            fallback_text,
-            attachments,
-            links,
-            downloaded_files,
-        )
-        fields["is_relevant"] = "yes" if is_relevant else "no"
-        fields["relevance_reason"] = relevance_reason
-    if "relevance_reason" not in fields:
-        fields["relevance_reason"] = str(payload.get("relevance_reason", ""))
+    is_relevant, relevance_reason = ma.assess_design_request_relevance(
+        subject,
+        sender,
+        fallback_text,
+        fallback_text,
+        attachments,
+        links,
+        downloaded_files,
+    )
+    fields["is_relevant"] = "yes" if is_relevant else "no"
+    fields["relevance_reason"] = relevance_reason
     return ma.ProcessedMessage(
         mailbox=str(payload.get("mailbox", "")),
         uid=str(payload.get("uid", "")),
