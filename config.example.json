@@ -22,7 +22,7 @@
       "reports/Заявки_*.xlsx"
     ],
     "local_path_prefix": "C:\\Users\\User\\Documents\\Создание КП на входящих",
-    "network_path_prefix": "\\\\server\\share\\Создание КП на входящих",
+    "network_path_prefix": "Z:\\Тендеры",
     "auth_username": "",
     "auth_password": "",
     "include_archive_root": false,

@@ -161,7 +161,6 @@ function renderTableHead() {
   const tr = make("tr");
   const statusTh = make("th", "sticky-col", "Решение");
   tr.append(statusTh);
-  tr.append(make("th", "", "Дата входа"));
   for (const header of state.payload.headers || []) {
     tr.append(make("th", "", header));
   }
@@ -174,7 +173,6 @@ function renderRow(item) {
   const statusTd = make("td", "sticky-col");
   statusTd.append(renderStatusCell(item));
   tr.append(statusTd);
-  tr.append(textCell(item.entryDate));
   for (const header of state.payload.headers || []) {
     tr.append(renderValueCell(item, header));
   }
@@ -232,10 +230,14 @@ function renderStatusCell(item) {
 
 function renderValueCell(item, header) {
   const rawValue = item.columns?.[header] || "";
-  if (header === "Тема" || header === "Объект" || header === "Название объекта") {
+  if (header === "Объект") {
     const td = textCell(rawValue);
     td.classList.add("row-title");
     return td;
+  }
+  if (header === "ТЗ") {
+    if (item.compact) return textCell("Файлы удалены");
+    return linkCell(item.technicalAssignmentFiles || []);
   }
   if (header === "Папка материалов") {
     return linkCell(item.folder ? [item.folder] : []);
@@ -250,7 +252,7 @@ function renderValueCell(item, header) {
     if (item.compact) return textCell("Файлы удалены");
     return linkCell(item.files || []);
   }
-  if (header === "Ссылки" || header === "Ссылки в интернете") {
+  if (header === "Ссылки" || header === "Ссылки в интернете" || header === "Ссылки на закупку") {
     const links = (item.links || []).map((url, index) => ({
       name: index === 0 ? "ссылка на закупку" : `ссылка на закупку ${index + 1}`,
       url,
@@ -327,7 +329,7 @@ function linkCell(links) {
   const limit = 12;
   links.slice(0, limit).forEach((link) => {
     const anchor = document.createElement("a");
-    const openPath = !link.download && (link.local || looksLikeLocalPath(link.path)) ? link.path : "";
+    const openPath = !link.browserOnly && !link.download && link.local ? link.path : "";
     anchor.href = link.url || link.path;
     anchor.textContent = link.name || link.path || link.url;
     anchor.title = link.path || link.url;

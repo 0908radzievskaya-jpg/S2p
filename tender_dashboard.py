@@ -68,6 +68,17 @@ STATUS_DEFS = {
     "not_relevant": {"label": "Не подходит", "sort": 90},
 }
 LEGACY_STATUS_MAP = {"analyzing": "unchecked"}
+DASHBOARD_DISPLAY_HEADERS = [
+    "Источник закупки",
+    "Объект",
+    "Заказчик",
+    "НМЦК",
+    "ТЗ",
+    "Ссылки на закупку",
+    "ТЭП",
+    "Рекомендация следующего действия",
+    "Папка материалов",
+]
 
 DOWNLOAD_DIR_NAMES = {"downloads", "downloads_refreshed", "01_downloaded_docs"}
 METADATA_FILENAMES = {
@@ -1322,6 +1333,8 @@ def file_url(path_text: str) -> str:
     normalized = path_text.replace("\\", "/")
     if path_text.startswith("\\\\"):
         return "file://///" + normalized.lstrip("/")
+    if re.match(r"^[a-zA-Z]:[\\/]", path_text):
+        return "file:///" + urllib.parse.quote(normalized, safe="/:")
     parsed = urllib.parse.urlparse(path_text)
     if parsed.scheme:
         return path_text
@@ -1357,6 +1370,231 @@ def linked_path(path_text: str, config: dict[str, Any]) -> dict[str, Any]:
         "url": file_url(mapped),
         "name": Path(mapped).name or mapped,
         "local": looks_like_local_path(mapped),
+    }
+
+
+def linked_material_folder(item: DashboardItem, config: dict[str, Any]) -> dict[str, Any]:
+    source = clean_text(item.analysis.get("source_dir") if isinstance(item.analysis, dict) else "")
+    if not source:
+        specific_dirs = item_specific_material_dirs(item)
+        source = str(specific_dirs[0]) if specific_dirs else ""
+    if not source:
+        return {"path": "", "url": "", "name": ""}
+    mapped = map_path_for_dashboard(source, config)
+    if mapped and mapped != source and looks_like_local_path(mapped):
+        return {
+            "path": mapped,
+            "url": file_url(mapped),
+            "name": "папка на диске Z" if re.match(r"^z:[\\/]", mapped, flags=re.IGNORECASE) else (Path(mapped).name or mapped),
+            "local": False,
+            "browserOnly": True,
+        }
+    return linked_path(item.material_dir, config) if item.material_dir else {"path": "", "url": "", "name": ""}
+
+
+def extract_urls_from_text(value: str) -> list[str]:
+    matches = re.findall(r"https?://[^\s;,)]+", value or "")
+    return list(dict.fromkeys(match.rstrip(".,)") for match in matches))
+
+
+def platform_label_from_text(value: str) -> str:
+    lowered = value.lower()
+    platform_tokens = [
+        ("zakupki360", "Закупки 360"),
+        ("zakupki.gov", "ЕИС zakupki.gov.ru"),
+        ("b2b-center", "B2B-Center"),
+        ("b2b-rts", "B2B-РТС"),
+        ("rts-tender", "РТС-тендер"),
+        ("sberbank-ast", "Сбербанк-АСТ"),
+        ("etp-ets", "ЭТП ЭТС"),
+        ("etp.gpb", "ЭТП ГПБ"),
+        ("etpgpb", "ЭТП ГПБ"),
+        ("тэк-торг", "ТЭК-Торг"),
+        ("tektorg", "ТЭК-Торг"),
+        ("roseltorg", "Росэлторг"),
+        ("fabrikant", "Фабрикант"),
+        ("tender.pro", "Tender.Pro"),
+        ("lot-online", "Lot-online"),
+    ]
+    for token, label in platform_tokens:
+        if token in lowered:
+            return label
+    return ""
+
+
+def procurement_source(item: DashboardItem) -> str:
+    columns = item.columns
+    link_text = " ".join([*item.links, first_column(columns, ("Ссылки в интернете", "Ссылки"))])
+    platform = platform_label_from_text(link_text)
+    if platform:
+        return platform
+    for path_text in [item.source_path, item.material_dir, clean_text(item.analysis.get("source_dir") if isinstance(item.analysis, dict) else "")]:
+        platform = platform_label_from_text(path_text)
+        if platform:
+            return platform
+    return first_column(columns, ("Почтовый ящик", "Источник закупки", "Источник")) or "—"
+
+
+def read_item_request_text(item: DashboardItem) -> str:
+    candidates = []
+    for base_text in [item.deep_analysis_dir, item.material_dir]:
+        if not base_text:
+            continue
+        base = Path(base_text)
+        candidates.extend([base / "_input" / "request.txt", base / "request.txt"])
+    for path in candidates:
+        try:
+            if path.exists() and path.is_file():
+                return path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+    return ""
+
+
+def extract_nmc_from_text(value: str) -> str:
+    if not value:
+        return ""
+    patterns = [
+        r"(?:Цена/НМЦК|НМЦК)\s*[:\-]?\s*([0-9][0-9\s.,]*(?:₽|руб\.?|р\.?)?)",
+        r"(?:Начальная\s*\(?максимальная\)?\s*цена(?:\s*(?:контракта|договора))?|Начальная цена|Общая стоимость закупки)\s*[:\-]?\s*([0-9][0-9\s.,]*(?:₽|руб\.?|р\.?)?)",
+        r"\(на сумму\s*([0-9][0-9\s.,]*(?:₽|руб\.?|р\.?)?)\s*\)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, value, flags=re.IGNORECASE)
+        if match:
+            amount = re.sub(r"\s+", " ", match.group(1)).strip()
+            if re.search(r"\d", amount):
+                return amount if re.search(r"₽|руб|р\.", amount, flags=re.IGNORECASE) else f"{amount} ₽"
+    if re.search(r"без указания цены", value, flags=re.IGNORECASE):
+        return "Без указания цены"
+    return ""
+
+
+def procurement_nmc(item: DashboardItem) -> str:
+    direct = first_column(
+        item.columns,
+        (
+            "НМЦК",
+            "Цена/НМЦК",
+            "Начальная цена",
+            "Начальная максимальная цена контракта",
+            "Начальная (максимальная) цена контракта",
+            "Начальная (максимальная) цена договора",
+            "Стоимость",
+        ),
+    )
+    if direct:
+        return direct
+    from_columns = extract_nmc_from_text(" ".join(clean_text(value) for value in item.columns.values()))
+    if from_columns:
+        return from_columns
+    return extract_nmc_from_text(read_item_request_text(item))
+
+
+def procurement_customer(item: DashboardItem) -> str:
+    value = first_column(item.columns, ("Заказчик", "Заказчик/отправитель"))
+    if not value:
+        return ""
+    value = re.split(r"\s+(?:Регион/площадка|Цена/НМЦК|НМЦК|Начальная цена)\s*:", value, maxsplit=1, flags=re.IGNORECASE)[0]
+    return value.strip(" ;")
+
+
+def tep_summary(item: DashboardItem) -> str:
+    if isinstance(item.analysis, dict):
+        tep_found = item.analysis.get("tep_found")
+        if isinstance(tep_found, list):
+            text = limited_join([clean_text(value) for value in tep_found], limit=8)
+            if text:
+                return text
+    return first_column(item.columns, ("ТЭП", "Ключевые технические параметры", "Объемы"))
+
+
+def technical_assignment_score(path: Path) -> int:
+    name = path.name.lower()
+    if any(token in name for token in ("нмцк", "обоснование", "контракт", "договор", "заявк", "протокол", "разъяснен")):
+        return 0
+    score = 0
+    if "описание объекта закупки" in name:
+        score += 80
+    if "техническое задание" in name or "техническое_задание" in name:
+        score += 80
+    if re.search(r"(^|[^а-яa-z])тз([^а-яa-z]|$)", name):
+        score += 60
+    if "задани" in name:
+        score += 35
+    if "техническ" in name:
+        score += 30
+    if "объект" in name and "закуп" in name:
+        score += 30
+    if "описание" in name:
+        score += 20
+    if path.suffix.lower() in {".pdf", ".doc", ".docx", ".xls", ".xlsx"}:
+        score += 10
+    return score
+
+
+def item_specific_material_dirs(item: DashboardItem) -> list[Path]:
+    dirs: list[Path] = []
+    for value in [item.deep_analysis_dir, item.material_dir]:
+        text = clean_text(value)
+        if not text:
+            continue
+        path = Path(text)
+        if path.name.lower() in {"reports", "релевантные", "archive", "sorted_mail"}:
+            continue
+        if path.exists() and path.is_dir():
+            dirs.append(path.resolve())
+    result: list[Path] = []
+    seen: set[str] = set()
+    for path in dirs:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            result.append(path)
+    return result
+
+
+def technical_assignment_paths(item: DashboardItem) -> list[str]:
+    candidates: dict[str, Path] = {}
+    direct_values = [
+        first_column(item.columns, ("ТЗ", "Техническое задание", "Описание объекта закупки")),
+        *item.attachments,
+        *item.downloaded_files,
+        *split_semicolon_paths(item.columns.get("Исходные файлы", "")),
+    ]
+    for value in direct_values:
+        text = clean_text(value)
+        if not text or re.match(r"^[a-z][a-z0-9+.-]*://", text, flags=re.IGNORECASE):
+            continue
+        path = Path(text)
+        if path.exists() and path.is_file():
+            candidates[str(path.resolve())] = path.resolve()
+
+    for base in item_specific_material_dirs(item):
+        try:
+            for path in base.rglob("*"):
+                if path.is_file():
+                    candidates[str(path.resolve())] = path.resolve()
+        except OSError:
+            continue
+
+    scored = [(technical_assignment_score(path), path) for path in candidates.values()]
+    selected = [path for score, path in sorted(scored, key=lambda pair: (-pair[0], pair[1].name.lower())) if score > 0]
+    return [str(path) for path in selected[:3]]
+
+
+def dashboard_display_columns(item: DashboardItem) -> dict[str, str]:
+    columns = item.columns
+    return {
+        "Источник закупки": procurement_source(item),
+        "Объект": first_column(columns, ("Объект", "Название объекта", "Тема")) or item.title,
+        "Заказчик": procurement_customer(item),
+        "НМЦК": procurement_nmc(item),
+        "ТЗ": "Файлы удалены" if item.compact else "",
+        "Ссылки на закупку": first_column(columns, ("Ссылки в интернете", "Ссылки")),
+        "ТЭП": tep_summary(item),
+        "Рекомендация следующего действия": first_column(columns, ("Рекомендация следующего действия", "Рекомендация")),
+        "Папка материалов": "",
     }
 
 
@@ -1546,33 +1784,16 @@ def send_dashboard_browse(
 
 
 def headers_for_items(items: Sequence[DashboardItem]) -> list[str]:
-    headers: list[str] = []
-    for item in items:
-        source_headers = item.headers or list(item.columns)
-        for header in source_headers:
-            if header and header not in headers:
-                headers.append(header)
-    return headers or report_headers()
+    return list(DASHBOARD_DISPLAY_HEADERS)
 
 
 def serialise_item(item: DashboardItem, config: dict[str, Any], headers: Sequence[str]) -> dict[str, Any]:
-    columns = dict(item.columns)
-    if item.compact:
-        keep = {
-            "Дата обработки",
-            "Дата входа",
-            "Тема",
-            "Объект",
-            "Название объекта",
-            "Статус достаточности",
-            "Папка материалов",
-        }
-        columns = {header: (columns.get(header, "") if header in keep else "") for header in headers}
-        columns["Исходные файлы"] = "Файлы удалены"
+    columns = dashboard_display_columns(item)
 
     files = [linked_path(path, config) for path in sorted(set([*item.attachments, *item.downloaded_files])) if path]
     downloaded = [linked_path(path, config) for path in sorted(set(item.downloaded_files)) if path]
-    folder = linked_path(item.material_dir, config) if item.material_dir else {"path": "", "url": "", "name": ""}
+    folder = linked_material_folder(item, config)
+    technical_assignment_files = [linked_path(path, config) for path in technical_assignment_paths(item)]
     return {
         "id": item.id,
         "sourceKind": item.source_kind,
@@ -1593,6 +1814,7 @@ def serialise_item(item: DashboardItem, config: dict[str, Any], headers: Sequenc
         "folder": folder,
         "files": files,
         "downloadedFiles": downloaded,
+        "technicalAssignmentFiles": technical_assignment_files,
         "links": item.links,
         "sourcePath": item.source_path,
         "deepAnalysisDir": item.deep_analysis_dir,

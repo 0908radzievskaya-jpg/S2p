@@ -277,7 +277,7 @@ function New-MinimalPackage {
     New-Item -ItemType Directory -Path (Join-Path $stagingRoot "релевантные") -Force | Out-Null
 
     $seen = @{}
-    $selectedNamePattern = "(?i)(^заявки_|^report-|тз|техническ|задани|смет|калькуляц|расче[тт]|аналит|записк)"
+    $selectedNamePattern = "(?i)(^заявки_|^report-|тз|техническ|задани|описан|объект.*закуп|смет|калькуляц|расче[тт]|аналит|записк)"
     $selectedExtensions = @(".pdf", ".doc", ".docx", ".xls", ".xlsx", ".txt")
     $analysisMetaNames = @(
         "03_document_index.json",
