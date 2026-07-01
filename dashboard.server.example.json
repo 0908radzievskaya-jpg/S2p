@@ -1,0 +1,24 @@
+{
+  "output_root": "archive",
+  "relevant_root": "релевантные",
+  "sorted_output_root": "sorted_mail",
+  "report_root": "reports",
+  "state_dir": ".state",
+  "dashboard": {
+    "host": "0.0.0.0",
+    "port": 8765,
+    "state_path": ".state/dashboard_statuses.json",
+    "file_retention_days": 3,
+    "file_link_mode": "download",
+    "relevant_excel_globs": [
+      "reports/Заявки_*.xlsx"
+    ],
+    "include_archive_root": false,
+    "auth_username": "",
+    "auth_password": "",
+    "bitrix_webhook_url": "",
+    "bitrix_source_id": "EMAIL",
+    "bitrix_responsible_id": "",
+    "bitrix_timeout_seconds": 20
+  }
+}

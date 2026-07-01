@@ -58,21 +58,33 @@ def rebuild_message_folder(base_dir: Path, config: dict[str, object]) -> ma.Proc
     refreshed_download_dir = base_dir / "downloads_refreshed"
     ma.ensure_dir(refreshed_download_dir)
     downloaded_files: List[str] = []
-    for link in links:
-        resources = ma.download_link_graph(
-            link,
-            refreshed_download_dir,
-            int(config.get("download_timeout_seconds", 30)),
-            str(config.get("user_agent", "mail-intake-automation/1.0")),
-            int(config.get("link_follow_depth", 2)),
-            int(config.get("max_downloaded_files_per_link", 20)),
-        )
-        if resources:
-            downloaded_files.extend(resource.local_path for resource in resources)
-
     attachments = list_existing_attachments(base_dir)
+    preliminary_text = "\n".join([subject, sender, saved_body_text, ma.html_to_text(html_body)])
+    preliminary_relevant, preliminary_reason = ma.assess_design_request_relevance(
+        subject,
+        sender,
+        saved_body_text,
+        preliminary_text,
+        attachments,
+        links,
+        [],
+    )
+    if preliminary_relevant:
+        for link in links:
+            resources = ma.download_link_graph(
+                link,
+                refreshed_download_dir,
+                int(config.get("download_timeout_seconds", 30)),
+                str(config.get("user_agent", "mail-intake-automation/1.0")),
+                int(config.get("link_follow_depth", 2)),
+                int(config.get("max_downloaded_files_per_link", 20)),
+            )
+            if resources:
+                downloaded_files.extend(resource.local_path for resource in resources)
     extracted_texts = [subject, saved_body_text, ma.html_to_text(html_body)]
     notes: List[str] = []
+    if not preliminary_relevant:
+        notes.append(f"Пропущена глубокая загрузка ссылок: {preliminary_reason}")
     for path_string in attachments + downloaded_files:
         text, item_notes = ma.extract_text_from_path(Path(path_string))
         if text:
@@ -116,6 +128,8 @@ def rebuild_message_folder(base_dir: Path, config: dict[str, object]) -> ma.Proc
         extracted_fields=fields,
         notes=notes,
     )
+    sufficiency_status, _, _ = ma.assess_sufficiency(fields, item.attachments, item.links, item.sections)
+    sorted_dir = ma.sync_sorted_message_copy(config, base_dir, is_relevant, sufficiency_status)
 
     summary_payload = {
         "mailbox": item.mailbox,
@@ -131,6 +145,7 @@ def rebuild_message_folder(base_dir: Path, config: dict[str, object]) -> ma.Proc
         "notes": item.notes,
         "is_relevant": is_relevant,
         "relevance_reason": relevance_reason,
+        "sorted_dir": sorted_dir,
     }
     analysis_path.write_text(json.dumps(summary_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return item
@@ -141,6 +156,8 @@ def write_full_report(report_path: Path, items: Sequence[ma.ProcessedMessage]) -
     sheet = workbook.active
     sheet.title = "Исходные данные"
     sheet.append(ma.REPORT_HEADERS)
+    pir_sheet = workbook.create_sheet("ТЭП и ПИР")
+    pir_sheet.append(ma.PIR_ESTIMATE_HEADERS)
     processed_at = dt.datetime.now().isoformat(timespec="seconds")
     for item in items:
         if item.extracted_fields.get("is_relevant") != "yes":
@@ -150,6 +167,11 @@ def write_full_report(report_path: Path, items: Sequence[ma.ProcessedMessage]) -
             for value in ma.build_report_row(processed_at, item)
         ]
         sheet.append(cleaned_row)
+        pir_row = [
+            ILLEGAL_XLSX_RE.sub("", str(value)) if value is not None else ""
+            for value in ma.build_pir_estimate_row(processed_at, item)
+        ]
+        pir_sheet.append(pir_row)
     ma.ensure_dir(report_path.parent)
     workbook.save(report_path)
 
@@ -163,7 +185,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     config = ma.load_config(Path(args.config))
     ma.RUNTIME_CONFIG = config
 
-    day_root = Path(str(config.get("output_root", "archive"))) / args.date
+    day_root = ma.get_relevant_output_root(config) / args.date
+    if not day_root.exists():
+        day_root = Path(str(config.get("output_root", "archive"))) / args.date
     if not day_root.exists():
         print(json.dumps({"processed_messages": 0, "report_path": "", "date": args.date}, ensure_ascii=False))
         return 0

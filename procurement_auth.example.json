@@ -1,0 +1,31 @@
+{
+  "default_timeout_seconds": 90,
+  "retries": 3,
+  "domains": {
+    "www.roseltorg.ru": {
+      "headers": {
+        "Cookie": "PASTE_BROWSER_COOKIE_HERE"
+      }
+    },
+    "business.roseltorg.ru": {
+      "headers": {
+        "Cookie": "PASTE_BROWSER_COOKIE_HERE"
+      }
+    },
+    "partner.samolet.ru": {
+      "headers": {
+        "Cookie": "PASTE_BROWSER_COOKIE_HERE"
+      }
+    },
+    "etpreg.phosagro.ru": {
+      "headers": {
+        "Cookie": "PASTE_BROWSER_COOKIE_HERE"
+      }
+    },
+    "www.tender.pro": {
+      "headers": {
+        "Cookie": "PASTE_BROWSER_COOKIE_HERE"
+      }
+    }
+  }
+}

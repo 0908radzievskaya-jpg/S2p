@@ -10,6 +10,7 @@ import json
 import mimetypes
 import os
 import re
+import shutil
 import socket
 import sys
 import urllib.error
@@ -117,6 +118,33 @@ REPORT_HEADERS = [
     "Папка материалов",
 ]
 
+PIR_ESTIMATE_HEADERS = [
+    "Дата обработки",
+    "Почтовый ящик",
+    "UID письма",
+    "Тема",
+    "Объект",
+    "Заказчик/отправитель",
+    "Адрес/местоположение",
+    "Вид работ",
+    "Стадия",
+    "Сроки",
+    "ТЭП",
+    "Состав работ",
+    "Разделы проектирования",
+    "Ориентировочная стоимость ПИР, руб. без НДС",
+    "Методика расчета",
+    "Нормативная база",
+    "Подбор СБЦ/НЗ",
+    "Статус нормативного расчета",
+    "Чего не хватает",
+    "Статус для расчета сметы",
+    "Рекомендация",
+    "Исходные файлы",
+    "Ссылки",
+    "Папка материалов",
+]
+
 RUNTIME_CONFIG: Dict[str, object] = {"imap_timeout_seconds": 20}
 
 
@@ -188,6 +216,58 @@ def decode_mime(value: Optional[str]) -> str:
 
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
+
+
+def get_sorted_output_root(config: Dict[str, object]) -> Path:
+    return Path(str(config.get("sorted_output_root", "sorted_mail")))
+
+
+def get_relevant_output_root(config: Dict[str, object]) -> Path:
+    return Path(str(config.get("relevant_root", config.get("output_root", "релевантные"))))
+
+
+def sufficiency_status_to_slug(status: str) -> str:
+    lowered = status.lower()
+    if "частично" in lowered:
+        return "partially_sufficient"
+    if "недостаточно" in lowered:
+        return "insufficient"
+    if "достаточно" in lowered:
+        return "sufficient"
+    return slugify(status, "unclassified")
+
+
+def sync_directory_tree(source_dir: Path, target_dir: Path) -> None:
+    ensure_dir(target_dir.parent)
+    if target_dir.exists():
+        shutil.rmtree(target_dir)
+    shutil.copytree(source_dir, target_dir)
+
+
+def sync_sorted_message_copy(
+    config: Dict[str, object],
+    base_dir: Path,
+    is_relevant: bool,
+    sufficiency_status: str,
+) -> str:
+    output_root = Path(str(config.get("output_root", "archive"))).resolve()
+    sorted_root = get_sorted_output_root(config).resolve()
+    try:
+        relative_dir = base_dir.resolve().relative_to(output_root)
+    except ValueError:
+        relative_dir = Path(*base_dir.parts[-4:])
+
+    for status_dir in ("sufficient", "partially_sufficient", "insufficient", "unclassified"):
+        candidate = sorted_root / status_dir / relative_dir
+        if candidate.exists():
+            shutil.rmtree(candidate)
+
+    if not is_relevant:
+        return ""
+
+    target_dir = sorted_root / sufficiency_status_to_slug(sufficiency_status) / relative_dir
+    sync_directory_tree(base_dir, target_dir)
+    return str(target_dir.resolve())
 
 
 def load_config(path: Path) -> Dict[str, object]:
@@ -367,11 +447,20 @@ def normalize_candidate_url(url: str) -> str:
     for key in ("u", "url", "target", "redirect", "to"):
         raw_value = (query.get(key) or [""])[0]
         unquoted = strip_control_chars(urllib.parse.unquote(raw_value))
-        if unquoted.startswith("http://") or unquoted.startswith("https://"):
+        if (
+            unquoted.startswith("http://")
+            or unquoted.startswith("https://")
+        ) and not (hostname.endswith("samolet.ru") and parsed.path.lower() == "/preview/file"):
             return normalize_candidate_url(unquoted)
         candidate = try_decode_redirect_payload(raw_value)
         if candidate:
             return normalize_candidate_url(candidate)
+
+    if hostname.endswith("samolet.ru") and parsed.path.lower() == "/preview/file":
+        raw_file_url = (query.get("url") or [""])[0]
+        file_url = strip_control_chars(urllib.parse.unquote(raw_file_url))
+        if file_url.startswith("http://") or file_url.startswith("https://"):
+            return normalize_candidate_url(file_url)
 
     if hostname == "stat.techmail.pik.ru":
         for key in ("h", "u"):
@@ -397,6 +486,15 @@ def is_same_scope(root_url: str, candidate_url: str) -> bool:
 def is_yandex_disk_public_url(url: str) -> bool:
     hostname = (urllib.parse.urlparse(url).hostname or "").lower()
     return hostname in {"disk.yandex.ru", "yadi.sk"}
+
+
+def extract_samolet_tender_id(url: str) -> str:
+    parsed = urllib.parse.urlparse(url)
+    hostname = (parsed.hostname or "").lower()
+    if not hostname.endswith("samolet.ru"):
+        return ""
+    match = re.search(r"/tenders/(\d+)(?:/|$)", parsed.path)
+    return match.group(1) if match else ""
 
 
 def is_roseltorg_url(url: str) -> bool:
@@ -450,7 +548,18 @@ def looks_like_document_url(url: str) -> bool:
     if suffix in DOCUMENT_EXTENSIONS:
         return True
     lowered = url.lower()
-    return any(token in lowered for token in ("/download", "attachment", "filename=", "file=", "/export"))
+    return any(
+        token in lowered
+        for token in (
+            "/download",
+            "attachment",
+            "filename=",
+            "file=",
+            "/export",
+            "/fileserializer/",
+            "/preview/file",
+        )
+    )
 
 
 def looks_like_asset_url(url: str) -> bool:
@@ -579,6 +688,15 @@ def message_has_attachments(message: Message) -> bool:
         if part.get_filename():
             return True
     return False
+
+
+def list_attachment_names(message: Message) -> List[str]:
+    names: List[str] = []
+    for part in message.walk():
+        filename = part.get_filename()
+        if filename:
+            names.append(decode_mime(filename))
+    return names
 
 
 def save_message_artifacts(message: Message, raw_message: bytes, base_dir: Path) -> Tuple[List[str], str]:
@@ -738,6 +856,91 @@ def download_yandex_disk_public_resource(
     return downloaded
 
 
+SAMOLET_TECHNICAL_DOCUMENT_SECTIONS = (
+    "designSpecification",
+    "planningDocumentation",
+)
+
+SAMOLET_OPTIONAL_TECHNICAL_NAME_TOKENS = (
+    "тз",
+    "задани",
+    "исход",
+    "проект",
+    "пир",
+    "bim",
+    "агр",
+    "пд",
+    "рд",
+    "С‚Р·",
+    "Р·Р°РґР°РЅРё",
+    "РёСЃС…РѕРґ",
+    "РїСЂРѕРµРєС‚",
+    "РїРёСЂ",
+    "Р°РіСЂ",
+)
+
+
+def extract_samolet_document_links(payload: Dict[str, object]) -> List[Tuple[str, str, str]]:
+    links: List[Tuple[str, str, str]] = []
+
+    def add_section(section_name: str, include_all: bool) -> None:
+        items = payload.get(section_name)
+        if not isinstance(items, list):
+            return
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            document_url = str(item.get("document") or item.get("url") or "")
+            document_name = str(item.get("name") or Path(urllib.parse.urlparse(document_url).path).name or "document")
+            if not document_url:
+                continue
+            lowered_name = document_name.lower()
+            if include_all or any(token in lowered_name for token in SAMOLET_OPTIONAL_TECHNICAL_NAME_TOKENS):
+                links.append((section_name, document_name, normalize_candidate_url(document_url)))
+
+    for section in SAMOLET_TECHNICAL_DOCUMENT_SECTIONS:
+        add_section(section, True)
+    add_section("additionalDocumentation", False)
+    add_section("draftOfContract", False)
+    return list(dict.fromkeys(links))
+
+
+def download_samolet_tender_documents(
+    root_url: str,
+    output_dir: Path,
+    timeout: int,
+    user_agent: str,
+    max_files: int,
+) -> List[DownloadedResource]:
+    tender_id = extract_samolet_tender_id(root_url)
+    if not tender_id or max_files <= 0:
+        return []
+
+    api_url = f"https://partner.samolet.ru/api/tender/tenders/{tender_id}/"
+    payload = fetch_json(api_url, {}, timeout, user_agent)
+    if not payload:
+        return []
+
+    root_dir = output_dir / slugify(tender_id, "samolet_tender")
+    ensure_dir(root_dir)
+    (root_dir / "tender_api.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    downloaded: List[DownloadedResource] = []
+    seen_urls: set[str] = set()
+    for section_name, document_name, document_url in extract_samolet_document_links(payload):
+        if len(downloaded) >= max_files:
+            break
+        if document_url in seen_urls:
+            continue
+        seen_urls.add(document_url)
+        section_dir = root_dir / slugify(section_name, "section")
+        target = section_dir / slugify(document_name, "document")
+        resource = download_binary_to_path(document_url, target, timeout, user_agent)
+        if resource:
+            downloaded.append(resource)
+    return downloaded
+
+
 def download_link_graph(
     root_url: str,
     output_dir: Path,
@@ -748,6 +951,10 @@ def download_link_graph(
 ) -> List[DownloadedResource]:
     if is_yandex_disk_public_url(root_url):
         return download_yandex_disk_public_resource(root_url, output_dir, timeout, user_agent, max_files)
+    if extract_samolet_tender_id(root_url):
+        downloaded = download_samolet_tender_documents(root_url, output_dir, timeout, user_agent, max_files)
+        if downloaded:
+            return downloaded
 
     downloaded: List[DownloadedResource] = []
     queue: List[Tuple[str, int]] = [(root_url, 0)]
@@ -1041,6 +1248,128 @@ def extract_tech_params(text: str) -> str:
     return " | ".join(matched[:5])
 
 
+def extract_work_scope(text: str, sections: Sequence[str]) -> str:
+    lines = [line.strip(" -\t") for line in text.splitlines() if line.strip()]
+    tokens = (
+        "разработ", "выполн", "проектир", "корректиров", "обследован", "изыскан",
+        "агр", "пд", "рд", "бим", "bim", "смет",
+        "Р СЂР°Р·СЂР°Р±", "РїСЂРѕРµРєС‚", "РєРѕСЂСЂРµРєС‚",
+    )
+    matched = [line for line in lines if any(token in line.lower() for token in tokens)]
+    if matched:
+        return " | ".join(dict.fromkeys(matched[:8]))
+    return "; ".join(section for section in sections if section)
+
+
+def infer_pir_missing_info(fields: Dict[str, str], work_scope: str) -> str:
+    missing: List[str] = []
+    for key, label in (
+        ("object", "объект"),
+        ("address", "адрес/местоположение"),
+        ("stage", "стадия проектирования"),
+        ("deadline", "сроки подготовки КП/работ"),
+        ("volumes", "ТЭП/объемы"),
+        ("tech_params", "ключевые технические параметры"),
+    ):
+        if not fields.get(key):
+            missing.append(label)
+    if not work_scope:
+        missing.append("состав работ")
+    return "; ".join(missing)
+
+
+def normalize_money(value: float) -> int:
+    return int(round(value / 1000.0) * 1000)
+
+
+def estimate_pir_cost(fields: Dict[str, str], sections: Sequence[str], work_scope: str) -> Tuple[str, str]:
+    text = " ".join([fields.get("work_type", ""), work_scope, "; ".join(sections)]).lower()
+    base = 350000.0
+    method_parts = ["база 350 000 руб."]
+    if any(token in text for token in ("рд", "рабоч", "Р Рґ")):
+        base += 350000
+        method_parts.append("+ РД 350 000")
+    if any(token in text for token in ("пд", "проектн", "РїРґ")):
+        base += 450000
+        method_parts.append("+ ПД 450 000")
+    if any(token in text for token in ("агр", "архитектурно-град", "Р°РіСЂ")):
+        base += 250000
+        method_parts.append("+ АГР 250 000")
+    if any(token in text for token in ("bim", "бим")):
+        base *= 1.2
+        method_parts.append("* BIM 1.2")
+    meaningful_sections = [section for section in sections if section and "проч" not in section.lower()]
+    if len(meaningful_sections) > 3:
+        coefficient = min(1.8, 1.0 + 0.08 * (len(meaningful_sections) - 3))
+        base *= coefficient
+        method_parts.append(f"* разделы {coefficient:.2f}")
+    method_parts.append("ТЭП частично учтены" if fields.get("volumes") or fields.get("tech_params") else "нет ТЭП, оценка укрупненная")
+    return str(normalize_money(base)), "; ".join(method_parts)
+
+
+def normative_basis_text() -> str:
+    return (
+        "СБЦ: https://www.minstroyrf.gov.ru/trades/tsenoobrazovanie/spravochniki-bazovykh-tsen/ | "
+        "ФРСН: https://www.minstroyrf.gov.ru/trades/tsenoobrazovanie/federalnyy-reestr-smetnykh-normativov/ | "
+        "НЗ: https://www.minstroyrf.gov.ru/trades/tsenoobrazovanie/"
+    )
+
+
+def select_normative_collection(fields: Dict[str, str], sections: Sequence[str], work_scope: str) -> Tuple[str, str]:
+    text = " ".join([fields.get("work_type", ""), work_scope, "; ".join(sections)]).lower()
+    candidates: List[str] = []
+    if any(token in text for token in ("изыск", "геолог", "геодез", "эколог")):
+        candidates.append("НЗ: инженерные изыскания")
+    if any(token in text for token in ("проект", "пд", "рд", "рабоч", "агр", "архитектур", "конструктив", "bim")):
+        candidates.append("НЗ: подготовка проектной документации")
+    if any(token in text for token in ("смет", "стоимост", "кп")):
+        candidates.append("СБЦ/НЗ: проверить применимый сборник по виду объекта и стадии")
+    if not candidates:
+        candidates.append("Подбор СБЦ/НЗ вручную по виду объекта")
+
+    missing_normative_data = infer_pir_missing_info(fields, work_scope)
+    status = "можно подобрать норматив после уточнения ТЭП" if missing_normative_data else "готово к подбору СБЦ/НЗ"
+    return "; ".join(dict.fromkeys(candidates)), status
+
+
+def build_pir_estimate_row(processed_at: str, item: ProcessedMessage) -> List[str]:
+    fields = item.extracted_fields
+    work_scope = fields.get("work_scope") or extract_work_scope(
+        " ".join([item.subject, fields.get("requirements", ""), fields.get("constraints", ""), fields.get("tech_params", "")]),
+        item.sections,
+    )
+    estimate, method = estimate_pir_cost(fields, item.sections, work_scope)
+    normative_collection, normative_status = select_normative_collection(fields, item.sections, work_scope)
+    status, _, action = assess_sufficiency(fields, item.attachments, item.links, item.sections)
+    tep = " | ".join(part for part in (fields.get("tech_params", ""), fields.get("volumes", "")) if part)
+    return [
+        processed_at,
+        item.mailbox,
+        item.uid,
+        item.subject,
+        fields.get("object", ""),
+        fields.get("customer", ""),
+        fields.get("address", ""),
+        fields.get("work_type", ""),
+        fields.get("stage", ""),
+        fields.get("deadline", ""),
+        tep,
+        work_scope,
+        "; ".join(item.sections),
+        estimate,
+        method,
+        normative_basis_text(),
+        normative_collection,
+        normative_status,
+        infer_pir_missing_info(fields, work_scope),
+        status,
+        action,
+        summarize_docs(item.attachments + item.downloaded_files),
+        "; ".join(item.links),
+        item.output_dir,
+    ]
+
+
 def infer_missing_info(extracted: Dict[str, str], body_text: str) -> str:
     missing = []
     for key, label in (
@@ -1139,6 +1468,24 @@ def append_rows_to_report(report_path: Path, rows: List[List[str]]) -> None:
     workbook.save(report_path)
 
 
+def append_pir_rows_to_report(report_path: Path, rows: List[List[str]]) -> None:
+    ensure_dir(report_path.parent)
+    if report_path.exists():
+        workbook = load_workbook(report_path)
+    else:
+        workbook = Workbook()
+        workbook.active.title = "Исходные данные"
+        workbook.active.append(REPORT_HEADERS)
+    if "ТЭП и ПИР" in workbook.sheetnames:
+        sheet = workbook["ТЭП и ПИР"]
+    else:
+        sheet = workbook.create_sheet("ТЭП и ПИР")
+        sheet.append(PIR_ESTIMATE_HEADERS)
+    for row in rows:
+        sheet.append(row)
+    workbook.save(report_path)
+
+
 def processed_aliases(mailbox_name: str, uid: str, message_id: str) -> List[str]:
     aliases = [f"{mailbox_name}:uid:{uid}"]
     if message_id:
@@ -1186,27 +1533,51 @@ def process_mailbox(cfg: MailboxConfig, config: Dict[str, object], state: Dict[s
                 continue
             body_text, html_body = extract_message_bodies(message)
             links = extract_links(body_text, html_body)
-            if not message_has_attachments(message) and not links:
+            attachment_names = list_attachment_names(message)
+            preliminary_body = body_text.strip() or html_to_text(html_body)
+            preliminary_text = "\n".join([subject, sender, preliminary_body, html_to_text(html_body)])
+            preliminary_relevant, preliminary_reason = assess_design_request_relevance(
+                subject,
+                sender,
+                preliminary_body,
+                preliminary_text,
+                attachment_names,
+                links,
+                [],
+            )
+            if not preliminary_relevant:
+                mark_message_processed(state, cfg.name, uid, message_id, {
+                    "processed_at": dt.datetime.now().isoformat(timespec="seconds"),
+                    "uid": uid,
+                    "mailbox": cfg.name,
+                    "subject": subject,
+                    "path": "",
+                    "is_relevant": False,
+                    "relevance_reason": preliminary_reason,
+                })
                 continue
             date_folder = parse_email_date(message).isoformat()
             sender_slug = slugify(sender, "unknown_sender")
             msg_slug = slugify(subject, hashlib.sha1(f"{cfg.name}:{uid}:{message_id}".encode("utf-8")).hexdigest()[:10])[:80]
-            base_dir = Path(str(config["output_root"])) / date_folder / slugify(cfg.name) / sender_slug / msg_slug
+            base_dir = get_relevant_output_root(config) / date_folder / slugify(cfg.name) / sender_slug / msg_slug
             attachments, saved_body_text = save_message_artifacts(message, raw_message, base_dir)
             downloaded_files: List[str] = []
-            for link in links:
-                resources = download_link_graph(
-                    link,
-                    base_dir / "downloads",
-                    int(config.get("download_timeout_seconds", 30)),
-                    str(config.get("user_agent", "mail-intake-automation/1.0")),
-                    int(config.get("link_follow_depth", 2)),
-                    int(config.get("max_downloaded_files_per_link", 20)),
-                )
-                if resources:
-                    downloaded_files.extend(resource.local_path for resource in resources)
+            if preliminary_relevant:
+                for link in links:
+                    resources = download_link_graph(
+                        link,
+                        base_dir / "downloads",
+                        int(config.get("download_timeout_seconds", 30)),
+                        str(config.get("user_agent", "mail-intake-automation/1.0")),
+                        int(config.get("link_follow_depth", 2)),
+                        int(config.get("max_downloaded_files_per_link", 20)),
+                    )
+                    if resources:
+                        downloaded_files.extend(resource.local_path for resource in resources)
             extracted_texts = [subject, saved_body_text, html_to_text(html_body)]
             notes: List[str] = []
+            if not preliminary_relevant:
+                notes.append(f"РџСЂРѕРїСѓС‰РµРЅР° РіР»СѓР±РѕРєР°СЏ Р·Р°РіСЂСѓР·РєР° СЃСЃС‹Р»РѕРє: {preliminary_reason}")
             for path_string in attachments + downloaded_files:
                 text, item_notes = extract_text_from_path(Path(path_string))
                 if text:
@@ -1243,6 +1614,8 @@ def process_mailbox(cfg: MailboxConfig, config: Dict[str, object], state: Dict[s
                 extracted_fields=fields,
                 notes=notes,
             )
+            sufficiency_status, _, _ = assess_sufficiency(fields, item.attachments, item.links, item.sections)
+            sorted_dir = sync_sorted_message_copy(config, base_dir, is_relevant, sufficiency_status)
             summary_path = base_dir / "analysis.json"
             summary_payload = {
                 "mailbox": item.mailbox,
@@ -1258,6 +1631,7 @@ def process_mailbox(cfg: MailboxConfig, config: Dict[str, object], state: Dict[s
                 "notes": item.notes,
                 "is_relevant": is_relevant,
                 "relevance_reason": relevance_reason,
+                "sorted_dir": sorted_dir,
             }
             summary_path.write_text(json.dumps(summary_payload, ensure_ascii=False, indent=2), encoding="utf-8")
             mark_message_processed(state, cfg.name, uid, message_id, {
@@ -1354,7 +1728,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if all_items:
         report_path = Path(str(config.get("report_root", "reports"))) / f"report-{report_date}.xlsx"
         rows = [build_report_row(processed_at, item) for item in all_items]
+        pir_rows = [build_pir_estimate_row(processed_at, item) for item in all_items]
         append_rows_to_report(report_path, rows)
+        append_pir_rows_to_report(report_path, pir_rows)
     save_state(state_path, state)
     print(json.dumps({
         "processed_messages": len(all_items),

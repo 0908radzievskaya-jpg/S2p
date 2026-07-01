@@ -1,11 +1,27 @@
 param(
     [string]$RootPath = "C:\Users\User\Documents\Создание КП на входящих",
     [string]$ArchivePath = "C:\Users\User\Documents\Создание КП на входящих\archive",
-    [string]$MemoryPath = "C:\Users\User\.codex\automations\automation\memory.md"
+    [string]$MemoryPath = "C:\Users\User\.codex\automations\automation\memory.md",
+    [string]$SortedRootPath = "C:\Users\User\Documents\Создание КП на входящих\sorted_mail",
+    [string]$UnprocessedRootPath = "C:\Users\User\Documents\Создание КП на входящих\unprocessed",
+    [int]$UnprocessedRetentionDays = 7
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+if (-not (Test-Path -LiteralPath $RootPath)) {
+    $RootPath = Split-Path -Parent $PSCommandPath
+}
+if (-not (Test-Path -LiteralPath $ArchivePath)) {
+    $ArchivePath = Join-Path $RootPath "archive"
+}
+if (-not [System.IO.Path]::IsPathRooted($SortedRootPath)) {
+    $SortedRootPath = Join-Path $RootPath $SortedRootPath
+}
+if (-not [System.IO.Path]::IsPathRooted($UnprocessedRootPath)) {
+    $UnprocessedRootPath = Join-Path $RootPath $UnprocessedRootPath
+}
 
 $headers = @(
     "Processed At",
@@ -55,12 +71,61 @@ function Get-LastProcessedUtc {
     if (-not (Test-Path -LiteralPath $Path)) {
         return $null
     }
-    $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
-    $match = [regex]::Match($raw, 'LastProcessedFileTimeUtc:\s*(.+)')
-    if (-not $match.Success) {
+    function Parse-UtcValue {
+        param([string]$Value)
+        $dto = [datetimeoffset]::MinValue
+        if ([datetimeoffset]::TryParse($Value, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$dto)) {
+            return $dto.UtcDateTime
+        }
         return $null
     }
-    return [datetime]::Parse($match.Groups[1].Value.Trim(), [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
+
+    $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
+    $match = [regex]::Match($raw, 'LastProcessedFileTimeUtc:\s*(.+)')
+    if ($match.Success) {
+        $value = $match.Groups[1].Value.Trim()
+        $parsed = Parse-UtcValue -Value $value
+        if ($parsed) {
+            return $parsed
+        }
+    }
+
+    $lastRunMatch = [regex]::Match($raw, 'Last run:\s*(.+)')
+    if ($lastRunMatch.Success) {
+        $parsed = Parse-UtcValue -Value $lastRunMatch.Groups[1].Value.Trim()
+        if ($parsed) {
+            return $parsed
+        }
+    }
+
+    return $null
+}
+
+function Update-MemoryFile {
+    param(
+        [string]$Path,
+        [datetime]$LastProcessedUtc,
+        [datetime]$RunStarted,
+        [int]$ProcessedCount,
+        [string]$ReportPath
+    )
+
+    $memoryDir = Split-Path -Parent $Path
+    if ($memoryDir) {
+        New-Item -ItemType Directory -Path $memoryDir -Force | Out-Null
+    }
+
+    $lines = @(
+        "Last run: $($RunStarted.ToUniversalTime().ToString('o'))",
+        "Run time: local archive processing",
+        "LastProcessedFileTimeUtc: $($LastProcessedUtc.ToString('o'))",
+        "",
+        "Summary:",
+        "- Processed folders: $ProcessedCount",
+        "- Report: $ReportPath"
+    )
+
+    Set-Content -LiteralPath $Path -Value ($lines -join "`r`n") -Encoding UTF8
 }
 
 function ConvertTo-CellRef {
@@ -167,6 +232,100 @@ function Get-SufficiencyMeta {
         Risks = "Input data is incomplete: $MissingInfo."
         Recommendation = "Clarify missing details before preparing the estimate/commercial offer."
     }
+}
+
+function Get-StatusFolderName {
+    param([string]$Status)
+    switch ($Status.ToLowerInvariant()) {
+        "sufficient" { return "sufficient" }
+        "partially sufficient" { return "partially_sufficient" }
+        "insufficient" { return "insufficient" }
+        default { return "unclassified" }
+    }
+}
+
+function Sync-SortedMessageFolder {
+    param(
+        [string]$SourceDir,
+        [string]$ArchiveRoot,
+        [string]$SortedRoot,
+        [string]$Status
+    )
+
+    $archiveRootResolved = [System.IO.Path]::GetFullPath($ArchiveRoot)
+    $sourceResolved = [System.IO.Path]::GetFullPath($SourceDir)
+    $sortedRootResolved = [System.IO.Path]::GetFullPath($SortedRoot)
+
+    if (-not $sourceResolved.StartsWith($archiveRootResolved, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return ""
+    }
+
+    $relativePath = $sourceResolved.Substring($archiveRootResolved.Length).TrimStart('\')
+    foreach ($statusFolder in @("sufficient", "partially_sufficient", "insufficient", "unclassified")) {
+        $existingTarget = Join-Path (Join-Path $sortedRootResolved $statusFolder) $relativePath
+        if (Test-Path -LiteralPath $existingTarget) {
+            $existingResolved = [System.IO.Path]::GetFullPath($existingTarget)
+            if ($existingResolved.StartsWith($sortedRootResolved, [System.StringComparison]::OrdinalIgnoreCase)) {
+                Remove-Item -LiteralPath $existingResolved -Recurse -Force
+            }
+        }
+    }
+
+    $statusFolderName = Get-StatusFolderName -Status $Status
+    $targetDir = Join-Path (Join-Path $sortedRootResolved $statusFolderName) $relativePath
+    $targetParent = Split-Path -Parent $targetDir
+    try {
+        if (-not (Test-Path -LiteralPath $targetParent)) {
+            New-Item -ItemType Directory -Path $targetParent -Force | Out-Null
+        }
+        if (Test-Path -LiteralPath $targetDir) {
+            Remove-Item -LiteralPath $targetDir -Recurse -Force
+        }
+        Copy-Item -LiteralPath $sourceResolved -Destination $targetDir -Recurse -Force
+        return $targetDir
+    } catch {
+        return ""
+    }
+}
+
+function Remove-StaleUnprocessedDownloads {
+    param(
+        [string]$RootPath,
+        [int]$RetentionDays
+    )
+
+    $removed = New-Object System.Collections.Generic.List[string]
+    if (-not (Test-Path -LiteralPath $RootPath)) {
+        return $removed
+    }
+
+    $cutoffUtc = (Get-Date).ToUniversalTime().AddDays(-1 * $RetentionDays)
+    $downloadDirs = Get-ChildItem -LiteralPath $RootPath -Recurse -Directory |
+        Where-Object { $_.Name -in @("downloads", "downloads_refreshed") }
+
+    foreach ($dir in $downloadDirs) {
+        $files = Get-ChildItem -LiteralPath $dir.FullName -Recurse -File
+        foreach ($file in $files) {
+            if ($file.LastWriteTimeUtc -le $cutoffUtc) {
+                Remove-Item -LiteralPath $file.FullName -Force
+                $removed.Add($file.FullName)
+            }
+        }
+
+        Get-ChildItem -LiteralPath $dir.FullName -Recurse -Directory |
+            Sort-Object FullName -Descending |
+            ForEach-Object {
+                if (-not (Get-ChildItem -LiteralPath $_.FullName -Force | Select-Object -First 1)) {
+                    Remove-Item -LiteralPath $_.FullName -Force
+                }
+            }
+
+        if (-not (Get-ChildItem -LiteralPath $dir.FullName -Force | Select-Object -First 1)) {
+            Remove-Item -LiteralPath $dir.FullName -Force
+        }
+    }
+
+    return $removed
 }
 
 function New-XlsxReport {
@@ -340,6 +499,7 @@ function New-XlsxReport {
 
 $runStarted = Get-Date
 $lastProcessedUtc = Get-LastProcessedUtc -Path $MemoryPath
+$removedUnprocessedDownloads = Remove-StaleUnprocessedDownloads -RootPath $UnprocessedRootPath -RetentionDays $UnprocessedRetentionDays
 $analysisFiles = Get-ChildItem -LiteralPath $ArchivePath -Recurse -Filter analysis.json -File | Sort-Object FullName
 $latestDateFolderPath = $null
 
@@ -368,6 +528,7 @@ $selected = foreach ($file in $analysisFiles) {
 $reportRows = New-Object System.Collections.Generic.List[hashtable]
 $processedFolders = New-Object System.Collections.Generic.List[string]
 $downloadFailures = New-Object System.Collections.Generic.List[string]
+$sortedFolders = New-Object System.Collections.Generic.List[string]
 
 foreach ($entry in $selected) {
     $analysisPath = $entry.File.FullName
@@ -439,6 +600,18 @@ foreach ($entry in $selected) {
     }
 
     $meta = Get-SufficiencyMeta -Sender $sender -Subject $subject -MissingInfo $missingInfo -Deadline $deadline -DownloadedFiles $downloadedFiles -Links $links
+    $isRelevant = $false
+    if ($null -ne $analysis.is_relevant) {
+        $isRelevant = [System.Convert]::ToBoolean($analysis.is_relevant)
+    } elseif ($fields -and $null -ne $fields.is_relevant) {
+        $isRelevant = ([string]$fields.is_relevant).ToLowerInvariant() -eq "yes"
+    }
+    if ($isRelevant) {
+        $sortedPath = Sync-SortedMessageFolder -SourceDir $messageDir -ArchiveRoot $ArchivePath -SortedRoot $SortedRootPath -Status ([string]$meta.Status)
+        if ($sortedPath) {
+            $sortedFolders.Add($sortedPath)
+        }
+    }
 
     $docScopeParts = @()
     if ($sections.Count -gt 0) {
@@ -493,6 +666,12 @@ $maxProcessedUtc = if ($selected) {
     report_path = $reportPath
     processed_count = $reportRows.Count
     processed_folders = @($processedFolders)
+    sorted_folders = @($sortedFolders)
     failed_downloads = @($downloadFailures)
+    removed_unprocessed_downloads = @($removedUnprocessedDownloads)
     last_processed_file_time_utc = if ($maxProcessedUtc) { $maxProcessedUtc.ToString("o") } else { "" }
 } | ConvertTo-Json -Depth 6
+
+if ($maxProcessedUtc) {
+    Update-MemoryFile -Path $MemoryPath -LastProcessedUtc $maxProcessedUtc -RunStarted $runStarted -ProcessedCount $reportRows.Count -ReportPath $reportPath
+}

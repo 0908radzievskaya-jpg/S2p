@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Dashboard закупок</title>
+    <link rel="stylesheet" href="/dashboard.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <h1>Закупки</h1>
+          <div class="meta-line" id="generatedAt">Загрузка</div>
+        </div>
+        <div class="topbar-actions">
+          <button class="button" id="refreshBtn" type="button">Обновить</button>
+          <button class="button button-danger" id="cleanupBtn" type="button">Очистить просроченные файлы</button>
+        </div>
+      </header>
+
+      <section class="metrics" aria-label="Сводка">
+        <div class="metric metric-new">
+          <div class="metric-value" id="statNew">0</div>
+          <div class="metric-label">новых</div>
+        </div>
+        <div class="metric metric-unchecked">
+          <div class="metric-value" id="statUnchecked">0</div>
+          <div class="metric-label">непроверенных</div>
+        </div>
+        <div class="metric metric-bad">
+          <div class="metric-value" id="statNotRelevant">0</div>
+          <div class="metric-label">неподходящих</div>
+        </div>
+        <div class="metric metric-work">
+          <div class="metric-value" id="statInWork">0</div>
+          <div class="metric-label">в работе</div>
+        </div>
+      </section>
+
+      <section class="filters" aria-label="Фильтры">
+        <label class="field">
+          <span>Поиск</span>
+          <input id="searchInput" type="search" placeholder="объект, заказчик, ссылка, файл">
+        </label>
+        <label class="field">
+          <span>Дата</span>
+          <select id="dateFilter"></select>
+        </label>
+        <label class="field">
+          <span>Статус</span>
+          <select id="statusFilter">
+            <option value="all">Все</option>
+            <option value="new">Новые</option>
+            <option value="unchecked">Непроверенные</option>
+            <option value="relevant">Релевантные</option>
+            <option value="not_relevant">Неподходящие</option>
+            <option value="analyzing">Анализируются</option>
+            <option value="submitting">Подаемся</option>
+            <option value="in_work">В работе</option>
+          </select>
+        </label>
+      </section>
+
+      <main id="content" class="content" aria-live="polite"></main>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/dashboard.js"></script>
+  </body>
+</html>

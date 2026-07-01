@@ -1,13 +1,36 @@
 {
   "output_root": "archive",
+  "relevant_root": "релевантные",
+  "sorted_output_root": "sorted_mail",
+  "unprocessed_root": "unprocessed",
   "report_root": "reports",
   "state_dir": ".state",
   "bootstrap_skip_existing": true,
+  "unprocessed_download_retention_days": 7,
   "download_timeout_seconds": 30,
   "link_follow_depth": 2,
   "max_downloaded_files_per_link": 20,
   "imap_timeout_seconds": 20,
   "user_agent": "mail-intake-automation/1.0",
+  "dashboard": {
+    "host": "127.0.0.1",
+    "port": 8765,
+    "state_path": ".state/dashboard_statuses.json",
+    "file_retention_days": 3,
+    "file_link_mode": "local",
+    "relevant_excel_globs": [
+      "reports/Заявки_*.xlsx"
+    ],
+    "local_path_prefix": "C:\\Users\\User\\Documents\\Создание КП на входящих",
+    "network_path_prefix": "\\\\server\\share\\Создание КП на входящих",
+    "auth_username": "",
+    "auth_password": "",
+    "include_archive_root": false,
+    "bitrix_webhook_url": "",
+    "bitrix_source_id": "EMAIL",
+    "bitrix_responsible_id": "",
+    "bitrix_timeout_seconds": 20
+  },
   "mailboxes": [
     {
       "name": "example-inbox",

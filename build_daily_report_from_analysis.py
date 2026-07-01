@@ -67,7 +67,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     config = ma.load_config(Path(args.config))
-    day_root = Path(str(config.get("output_root", "archive"))) / args.date
+    day_root = ma.get_relevant_output_root(config) / args.date
+    if not day_root.exists():
+        day_root = Path(str(config.get("output_root", "archive"))) / args.date
     report_path = Path(str(config.get("report_root", "reports"))) / f"report-{args.date}.xlsx"
 
     items: List[ma.ProcessedMessage] = [item_from_analysis(path) for path in sorted(day_root.rglob("analysis.json"))]
@@ -77,10 +79,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     sheet = workbook.active
     sheet.title = "Исходные данные"
     sheet.append(ma.REPORT_HEADERS)
+    pir_sheet = workbook.create_sheet("ТЭП и ПИР")
+    pir_sheet.append(ma.PIR_ESTIMATE_HEADERS)
     processed_at = dt.datetime.now().isoformat(timespec="seconds")
     for item in relevant_items:
         row = [ILLEGAL_XLSX_RE.sub("", str(value)) if value is not None else "" for value in ma.build_report_row(processed_at, item)]
         sheet.append(row)
+        pir_row = [
+            ILLEGAL_XLSX_RE.sub("", str(value)) if value is not None else ""
+            for value in ma.build_pir_estimate_row(processed_at, item)
+        ]
+        pir_sheet.append(pir_row)
     ma.ensure_dir(report_path.parent)
     saved_report_path = report_path
     try:

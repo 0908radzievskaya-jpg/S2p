@@ -4,4 +4,8 @@ reports/
 __pycache__/
 *.pyc
 config.json
+dashboard.server.json
+procurement_auth.json
+_review_ai_tender/procurement_auth.json
+_review_ai_tender/ai-tender-analyzer-pir-calculator-v0/procurement_auth.json
 run-report-*.xlsx
