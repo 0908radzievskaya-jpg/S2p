@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
+    [string]$ProjectRoot = "",
     [string]$RemoteHost = "194.113.209.237",
     [string]$RemoteUser = "root",
     [string]$RemoteAppDir = "/opt/tender-dashboard",
@@ -16,6 +16,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+
+if (-not $ProjectRoot) {
+    $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+}
 
 if ($EveryMinutes -lt 0) {
     throw "EveryMinutes must be 0 or greater."
