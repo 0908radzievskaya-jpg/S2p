@@ -6,7 +6,7 @@ const state = {
   expandedRows: new Set(),
 };
 
-const statusOrder = ["unchecked", "relevant", "not_relevant", "analyzing", "submitting"];
+const statusOrder = ["unchecked", "relevant", "submitting", "not_relevant"];
 
 const els = {
   content: document.getElementById("content"),
@@ -94,7 +94,7 @@ function updateStats() {
 function itemMatchesFilters(item) {
   if (state.date !== "all" && item.entryDate !== state.date) return false;
   if (state.status === "new" && !item.isNew) return false;
-  if (state.status === "in_work" && !["analyzing", "submitting"].includes(item.status)) return false;
+  if (state.status === "in_work" && item.status !== "submitting") return false;
   if (!["all", "new", "in_work"].includes(state.status) && item.status !== state.status) return false;
 
   const query = state.search.trim().toLowerCase();
@@ -185,7 +185,6 @@ function rowClass(item) {
   const classes = [];
   if (item.isNew) classes.push("row-new");
   if (item.status === "relevant") classes.push("row-relevant");
-  if (item.status === "analyzing") classes.push("row-analyzing");
   if (item.status === "submitting") classes.push("row-submitting");
   if (item.status === "not_relevant") classes.push("row-not_relevant");
   if (state.expandedRows.has(item.id)) classes.push("row-expanded");
@@ -209,15 +208,17 @@ function renderStatusCell(item) {
     input.className = "status-radio";
     input.checked = item.status === status;
     label.append(input);
-    label.append(document.createTextNode(statuses[status]?.label || status));
+    label.append(document.createTextNode(statuses[status]?.actionLabel || statuses[status]?.label || status));
     cell.append(label);
   }
   const meta = make("div", "status-meta");
   const badges = [];
   if (item.isNew) badges.push(["badge badge-new", "новая"]);
   if (item.bitrixLeadId) badges.push(["badge badge-bitrix", `Bitrix #${item.bitrixLeadId}`]);
+  if (item.bitrixTaskId) badges.push(["badge badge-bitrix", `Задача #${item.bitrixTaskId}`]);
   if (item.filesDeletedAt) badges.push(["badge", `файлы удалены ${formatDateTime(item.filesDeletedAt)}`]);
   if (item.bitrixError) badges.push(["badge badge-error", `Bitrix: ${item.bitrixError}`]);
+  if (item.bitrixTaskError) badges.push(["badge badge-error", `Задача: ${item.bitrixTaskError}`]);
   for (const [className, text] of badges) {
     meta.append(make("span", className, text));
     meta.append(document.createTextNode(" "));
@@ -356,11 +357,18 @@ async function updateStatus(itemId, status) {
   syncDateFilter();
   render();
   if (payload.bitrix?.status === "sent") {
-    showToast(`Лид Bitrix создан: #${payload.bitrix.leadId}`);
+    const taskText = payload.bitrix.taskId ? `, задача #${payload.bitrix.taskId}` : "";
+    showToast(`Bitrix: лид #${payload.bitrix.leadId}${taskText}`);
+  } else if (payload.bitrix?.status === "already_sent") {
+    showToast("Bitrix уже был создан для этой закупки.");
+  } else if (payload.bitrix?.status === "partial") {
+    showToast(`Лид Bitrix #${payload.bitrix.leadId}. Задача ГИПу не создана: ${payload.bitrix.message}`);
   } else if (payload.bitrix?.status === "not_configured") {
     showToast("Статус сохранен. Bitrix webhook не задан в конфиге.");
   } else if (payload.bitrix?.status === "error") {
     showToast(`Bitrix не принял лид: ${payload.bitrix.message}`);
+  } else if (payload.cleanup?.status) {
+    showToast(`Файлы помечены на удаление. Удалено на сервере: ${payload.cleanup.deletedCount || 0}`);
   }
 }
 
@@ -433,7 +441,7 @@ els.refreshBtn.addEventListener("click", async () => {
 });
 
 els.cleanupBtn.addEventListener("click", async () => {
-  const confirmed = window.confirm("Удалить скачанные файлы старше срока хранения для закупок без статуса «Подаемся»?");
+  const confirmed = window.confirm("Удалить скачанные файлы старше срока хранения для закупок без статуса «Релевантна» или «В работе»?");
   if (!confirmed) return;
   try {
     const result = await fetchJson("/api/cleanup", { method: "POST", body: "{}" });

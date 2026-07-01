@@ -64,12 +64,28 @@ REPORT_HEADERS_FALLBACK = [
 STATUS_DEFS = {
     "unchecked": {"label": "Непроверена", "sort": 10},
     "relevant": {"label": "Релевантна", "sort": 20},
-    "analyzing": {"label": "Анализируется", "sort": 30},
-    "submitting": {"label": "Подаемся", "sort": 40},
+    "submitting": {"label": "В работе", "actionLabel": "Подаемся", "sort": 40},
     "not_relevant": {"label": "Не подходит", "sort": 90},
 }
+LEGACY_STATUS_MAP = {"analyzing": "unchecked"}
 
 DOWNLOAD_DIR_NAMES = {"downloads", "downloads_refreshed", "01_downloaded_docs"}
+METADATA_FILENAMES = {
+    "03_document_index.json",
+    "04_project_card.json",
+    "05_tep.json",
+    "06_scope.json",
+    "07_requirements.json",
+    "08_red_flags.json",
+    "09_missing_data.json",
+    "12_analysis_report.json",
+    "14_pir_normative_estimate.json",
+    "batch_index.json",
+    "links.txt",
+    "request_meta.json",
+    "run_summary.json",
+    "source_message_path.txt",
+}
 DEFAULT_RELEVANT_EXCEL_GLOBS = ["reports/Заявки_*.xlsx"]
 ANALYTIC_NOTE_HEADER = "Краткая аналитическая записка"
 DEADLINE_HEADER = "Крайняя дата подачи предложений"
@@ -107,7 +123,9 @@ class DashboardItem:
     decision_updated_at: str = ""
     files_deleted_at: str = ""
     bitrix_lead_id: str = ""
+    bitrix_task_id: str = ""
     bitrix_error: str = ""
+    bitrix_task_error: str = ""
     is_new: bool = False
     compact: bool = False
 
@@ -988,6 +1006,7 @@ def item_from_deep_analysis(path: Path, config: dict[str, Any], config_path: Pat
         "missing_questions": missing_questions,
         "documents": [Path(path_text).name for path_text in all_files],
         "report_dir": str(report_dir.resolve()),
+        "source_dir": source_path_text,
     }
 
     values = [
@@ -1145,6 +1164,7 @@ def item_from_excel_row(
         downloaded_files=downloaded_files,
         links=links,
         deep_analysis_dir=deep_match.deep_analysis_dir if deep_match is not None else "",
+        analysis=dict(deep_match.analysis) if deep_match is not None else {},
     )
 
 
@@ -1230,15 +1250,22 @@ def apply_state(items: list[DashboardItem], state: dict[str, Any], mutate: bool 
                 changed = True
 
         status = clean_text(record.get("status")) or "unchecked"
-        if status not in STATUS_DEFS:
-            status = "unchecked"
+        normalized_status = LEGACY_STATUS_MAP.get(status, status)
+        if normalized_status not in STATUS_DEFS:
+            normalized_status = "unchecked"
+        if mutate and normalized_status != status:
+            record["status"] = normalized_status
+            changed = True
+        status = normalized_status
         item.status = status
         item.status_label = STATUS_DEFS[status]["label"]
         item.first_seen_at = clean_text(record.get("first_seen_at"))
         item.decision_updated_at = clean_text(record.get("decision_updated_at"))
         item.files_deleted_at = clean_text(record.get("files_deleted_at"))
         item.bitrix_lead_id = clean_text(record.get("bitrix_lead_id"))
+        item.bitrix_task_id = clean_text(record.get("bitrix_task_id"))
         item.bitrix_error = clean_text(record.get("bitrix_error"))
+        item.bitrix_task_error = clean_text(record.get("bitrix_task_error"))
         item.is_new = status == "unchecked" and item.first_seen_at[:10] == today
         item.compact = status == "not_relevant" and bool(item.files_deleted_at)
     return changed
@@ -1559,7 +1586,9 @@ def serialise_item(item: DashboardItem, config: dict[str, Any], headers: Sequenc
         "decisionUpdatedAt": item.decision_updated_at,
         "filesDeletedAt": item.files_deleted_at,
         "bitrixLeadId": item.bitrix_lead_id,
+        "bitrixTaskId": item.bitrix_task_id,
         "bitrixError": item.bitrix_error,
+        "bitrixTaskError": item.bitrix_task_error,
         "columns": columns,
         "folder": folder,
         "files": files,
@@ -1584,7 +1613,7 @@ def dashboard_payload(config: dict[str, Any], config_path: Path) -> dict[str, An
         "new": sum(1 for item in items if item.is_new),
         "unchecked": sum(1 for item in items if item.status == "unchecked"),
         "notRelevant": sum(1 for item in items if item.status == "not_relevant"),
-        "inWork": sum(1 for item in items if item.status in {"analyzing", "submitting"}),
+        "inWork": sum(1 for item in items if item.status == "submitting"),
     }
     dates = sorted({item.entry_date for item in items if item.entry_date}, reverse=True)
     return {
@@ -1595,6 +1624,161 @@ def dashboard_payload(config: dict[str, Any], config_path: Path) -> dict[str, An
         "dates": dates,
         "fileLinkMode": dashboard_file_link_mode(config),
         "items": serialised,
+    }
+
+
+def record_list_append(record: dict[str, Any], key: str, values: Iterable[str]) -> None:
+    previous = record.get(key, [])
+    if not isinstance(previous, list):
+        previous = []
+    cleaned = [clean_text(value) for value in values if clean_text(value)]
+    if cleaned:
+        record[key] = sorted(set([*previous, *cleaned]))
+
+
+def cleanup_roots(config: dict[str, Any], config_path: Path) -> list[Path]:
+    roots = configured_roots(config, config_path)
+    allowed = [roots["reports"], roots["relevant"]]
+    if bool(dashboard_config(config).get("include_archive_root", False)):
+        allowed.append(roots["output"])
+    return [root.resolve() for root in allowed]
+
+
+def cleanup_relative_path(path: Path, roots: Sequence[Path]) -> str:
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return ""
+    for root in roots:
+        try:
+            relative = resolved.relative_to(root.resolve())
+        except (OSError, ValueError):
+            continue
+        if not relative.parts:
+            return ""
+        return "/".join([root.name, relative.as_posix()])
+    return ""
+
+
+def cleanup_candidate_strings(item: DashboardItem) -> list[str]:
+    candidates = [
+        item.material_dir,
+        item.deep_analysis_dir,
+        clean_text(item.analysis.get("report_dir") if isinstance(item.analysis, dict) else ""),
+        clean_text(item.analysis.get("source_dir") if isinstance(item.analysis, dict) else ""),
+        *item.attachments,
+        *item.downloaded_files,
+        *split_semicolon_paths(item.columns.get("Исходные файлы", "")),
+    ]
+    return list(dict.fromkeys(clean_text(candidate) for candidate in candidates if clean_text(candidate)))
+
+
+def resolve_cleanup_candidate(path_text: str, config_path: Path) -> Path | None:
+    text = clean_text(path_text).strip().strip('"')
+    if not text or re.match(r"^[a-z][a-z0-9+.-]*://", text, flags=re.IGNORECASE):
+        return None
+    if re.match(r"^[A-Za-z]:[\\/]", text):
+        return None
+    path = Path(text)
+    if not path.is_absolute():
+        path = config_path.parent / path
+    try:
+        return path.resolve()
+    except OSError:
+        return None
+
+
+def safe_cleanup_file(path: Path, roots: Sequence[Path]) -> bool:
+    if not path.exists() or not path.is_file():
+        return False
+    if path.name in METADATA_FILENAMES or path.suffix.lower() == ".json":
+        return False
+    if not any(path_within(path, root) for root in roots):
+        return False
+    for root in roots:
+        try:
+            relative = path.resolve().relative_to(root.resolve())
+        except (OSError, ValueError):
+            continue
+        if len(relative.parts) == 1 and path.suffix.lower() in {".xlsx", ".xls"}:
+            return False
+    return True
+
+
+def iter_cleanup_files(path: Path, roots: Sequence[Path]) -> list[Path]:
+    if path.is_file():
+        return [path] if safe_cleanup_file(path, roots) else []
+    if not path.exists() or not path.is_dir():
+        return []
+    if not any(path_within(path, root) for root in roots):
+        return []
+    if any(path.resolve() == root.resolve() for root in roots):
+        return []
+    return [candidate for candidate in path.rglob("*") if safe_cleanup_file(candidate, roots)]
+
+
+def prune_empty_dirs_to_roots(start: Path, roots: Sequence[Path]) -> list[str]:
+    removed: list[str] = []
+    current = start
+    while True:
+        if any(current.resolve() == root.resolve() for root in roots):
+            break
+        if not any(path_within(current, root) for root in roots):
+            break
+        try:
+            current.rmdir()
+            removed.append(str(current))
+        except OSError:
+            break
+        current = current.parent
+    return removed
+
+
+def delete_not_relevant_files(item: DashboardItem, record: dict[str, Any], config: dict[str, Any], config_path: Path) -> dict[str, Any]:
+    roots = cleanup_roots(config, config_path)
+    candidate_texts = cleanup_candidate_strings(item)
+    files: dict[str, Path] = {}
+    relative_candidates: list[str] = []
+    for text in candidate_texts:
+        path = resolve_cleanup_candidate(text, config_path)
+        if path is None:
+            continue
+        relative = cleanup_relative_path(path, roots)
+        if relative:
+            relative_candidates.append(relative)
+        for candidate in iter_cleanup_files(path, roots):
+            files[str(candidate)] = candidate
+
+    deleted: list[str] = []
+    deleted_relative: list[str] = []
+    deleted_dirs: list[str] = []
+    errors: list[str] = []
+    for path in sorted(files.values(), key=lambda value: len(value.parts), reverse=True):
+        relative = cleanup_relative_path(path, roots)
+        try:
+            path.unlink()
+            deleted.append(str(path))
+            if relative:
+                deleted_relative.append(relative)
+            deleted_dirs.extend(prune_empty_dirs_to_roots(path.parent, roots))
+        except OSError as exc:
+            errors.append(f"{path}: {exc}")
+
+    record_list_append(record, "deleted_files", deleted)
+    record_list_append(record, "deleted_relative_paths", [*deleted_relative, *relative_candidates])
+    record_list_append(record, "local_delete_candidates", candidate_texts)
+    record_list_append(record, "deleted_dirs", deleted_dirs)
+    if errors:
+        record["cleanup_error"] = "; ".join(errors)
+    else:
+        record.pop("cleanup_error", None)
+    record["files_deleted_at"] = now_iso()
+    return {
+        "status": "cleaned" if deleted else "marked",
+        "deletedCount": len(deleted),
+        "deletedFiles": deleted,
+        "deletedDirs": deleted_dirs,
+        "errors": errors,
     }
 
 
@@ -1612,19 +1796,28 @@ def update_item_status(
     record["status"] = status
     record["decision_updated_at"] = now_iso()
     record.pop("bitrix_error", None)
+    record.pop("bitrix_task_error", None)
 
     bitrix_result: dict[str, Any] | None = None
-    if status == "submitting":
+    cleanup_result: dict[str, Any] | None = None
+    if status in {"relevant", "not_relevant"}:
         items = collect_items(config, config_path)
         apply_state(items, state, mutate=False)
         item = next((candidate for candidate in items if candidate.id == item_id), None)
         if item is None:
             raise KeyError(item_id)
+    else:
+        item = None
+
+    if status == "relevant" and item is not None:
         bitrix_result = push_item_to_bitrix(item, record, config)
+    elif status == "not_relevant" and item is not None:
+        cleanup_result = delete_not_relevant_files(item, record, config, config_path)
 
     save_state(config, config_path, state)
     payload = dashboard_payload(config, config_path)
     payload["bitrix"] = bitrix_result
+    payload["cleanup"] = cleanup_result
     return payload
 
 
@@ -1634,13 +1827,55 @@ def bitrix_method_url(webhook: str, method: str) -> str:
         return ""
     if method in webhook:
         return webhook
-    return webhook.rstrip("/") + f"/{method}.json"
+    parsed = urllib.parse.urlsplit(webhook)
+    path = parsed.path.rstrip("/")
+    parts = path.split("/") if path else []
+    if parts and (parts[-1].endswith(".json") or "." in parts[-1]):
+        path = "/".join(parts[:-1])
+    path = path.rstrip("/") + f"/{method}.json"
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+
+def call_bitrix_method(webhook: str, method: str, fields: dict[str, Any], timeout: int) -> dict[str, Any]:
+    url = bitrix_method_url(webhook, method)
+    body = urllib.parse.urlencode(fields, doseq=True).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded; charset=utf-8"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        payload = json.loads(response.read().decode("utf-8", errors="ignore"))
+    return payload if isinstance(payload, dict) else {"result": payload}
+
+
+def extract_bitrix_task_id(payload: dict[str, Any]) -> str:
+    result = payload.get("result")
+    if isinstance(result, dict):
+        task = result.get("task")
+        if isinstance(task, dict):
+            return clean_text(task.get("id"))
+        return clean_text(result.get("id"))
+    return clean_text(result)
+
+
+def bitrix_task_deadline(dash: dict[str, Any]) -> str:
+    hours = clean_text(dash.get("bitrix_task_deadline_hours"))
+    days = clean_text(dash.get("bitrix_task_deadline_days"))
+    try:
+        if hours:
+            delta = dt.timedelta(hours=int(hours))
+        elif days:
+            delta = dt.timedelta(days=int(days))
+        else:
+            return ""
+    except ValueError:
+        return ""
+    return (dt.datetime.now() + delta).isoformat(timespec="seconds")
 
 
 def push_item_to_bitrix(item: DashboardItem, record: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
-    if record.get("bitrix_lead_id"):
-        return {"status": "already_sent", "leadId": clean_text(record.get("bitrix_lead_id"))}
-
     dash = dashboard_config(config)
     webhook = clean_text(dash.get("bitrix_webhook_url") or config.get("bitrix_webhook_url"))
     if not webhook:
@@ -1689,30 +1924,104 @@ def push_item_to_bitrix(item: DashboardItem, record: dict[str, Any], config: dic
     if responsible_id:
         fields["fields[ASSIGNED_BY_ID]"] = responsible_id
 
-    url = bitrix_method_url(webhook, "crm.lead.add")
     timeout = int(dash.get("bitrix_timeout_seconds") or 20)
-    body = urllib.parse.urlencode(fields).encode("utf-8")
-    request = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Content-Type": "application/x-www-form-urlencoded; charset=utf-8"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8", errors="ignore"))
-    except Exception as exc:
-        record["bitrix_error"] = str(exc)
-        return {"status": "error", "message": str(exc)}
 
-    lead_id = clean_text(payload.get("result"))
-    if lead_id:
+    lead_id = clean_text(record.get("bitrix_lead_id"))
+    lead_created = False
+    if not lead_id:
+        try:
+            payload = call_bitrix_method(webhook, "crm.lead.add", fields, timeout)
+        except Exception as exc:
+            record["bitrix_error"] = str(exc)
+            return {"status": "error", "message": str(exc)}
+
+        lead_id = clean_text(payload.get("result"))
+        if not lead_id:
+            error = clean_text(payload.get("error_description") or payload.get("error") or payload)
+            record["bitrix_error"] = error
+            return {"status": "error", "message": error}
+        lead_created = True
         record["bitrix_lead_id"] = lead_id
         record["bitrix_uploaded_at"] = now_iso()
         record.pop("bitrix_error", None)
-        return {"status": "sent", "leadId": lead_id}
+
+    task_result = push_bitrix_gip_task(item, record, config, webhook, lead_id, title, comments, timeout)
+    if task_result.get("status") in {"sent", "already_sent"}:
+        return {
+            "status": "sent" if lead_created else "already_sent",
+            "leadId": lead_id,
+            "taskId": clean_text(task_result.get("taskId")),
+        }
+    return {
+        "status": "partial" if lead_id else clean_text(task_result.get("status")) or "error",
+        "leadId": lead_id,
+        "message": clean_text(task_result.get("message")),
+    }
+
+
+def push_bitrix_gip_task(
+    item: DashboardItem,
+    record: dict[str, Any],
+    config: dict[str, Any],
+    webhook: str,
+    lead_id: str,
+    title: str,
+    comments: str,
+    timeout: int,
+) -> dict[str, Any]:
+    existing_task_id = clean_text(record.get("bitrix_task_id"))
+    if existing_task_id:
+        return {"status": "already_sent", "taskId": existing_task_id}
+
+    dash = dashboard_config(config)
+    gip_user_id = clean_text(
+        dash.get("bitrix_gip_user_id")
+        or dash.get("bitrix_task_responsible_id")
+        or dash.get("bitrix_responsible_id")
+    )
+    if not gip_user_id:
+        record["bitrix_task_error"] = "Не задан dashboard.bitrix_gip_user_id"
+        return {"status": "not_configured", "message": record["bitrix_task_error"]}
+
+    description = "\n\n".join(
+        part
+        for part in (
+            f"Лид CRM: #{lead_id}",
+            "Задача: оценить закупку и подготовить решение по участию.",
+            comments,
+        )
+        if part
+    )
+    fields: dict[str, Any] = {
+        "fields[TITLE]": f"Оценить закупку: {title}",
+        "fields[DESCRIPTION]": description,
+        "fields[RESPONSIBLE_ID]": gip_user_id,
+        "fields[UF_CRM_TASK][]": [f"L_{lead_id}"],
+    }
+    created_by = clean_text(dash.get("bitrix_task_created_by_id"))
+    if created_by:
+        fields["fields[CREATED_BY]"] = created_by
+    group_id = clean_text(dash.get("bitrix_task_group_id"))
+    if group_id:
+        fields["fields[GROUP_ID]"] = group_id
+    deadline = bitrix_task_deadline(dash)
+    if deadline:
+        fields["fields[DEADLINE]"] = deadline
+
+    try:
+        payload = call_bitrix_method(webhook, "tasks.task.add", fields, timeout)
+    except Exception as exc:
+        record["bitrix_task_error"] = str(exc)
+        return {"status": "error", "message": str(exc)}
+
+    task_id = extract_bitrix_task_id(payload)
+    if task_id:
+        record["bitrix_task_id"] = task_id
+        record["bitrix_task_created_at"] = now_iso()
+        record.pop("bitrix_task_error", None)
+        return {"status": "sent", "taskId": task_id}
     error = clean_text(payload.get("error_description") or payload.get("error") or payload)
-    record["bitrix_error"] = error
+    record["bitrix_task_error"] = error
     return {"status": "error", "message": error}
 
 
@@ -1776,7 +2085,7 @@ def cleanup_downloaded_files(config: dict[str, Any], config_path: Path) -> dict[
     skipped: list[str] = []
     for item in items:
         record = records.setdefault(item.id, {})
-        if clean_text(record.get("status")) == "submitting":
+        if clean_text(record.get("status")) in {"relevant", "submitting"}:
             skipped.append(item.id)
             continue
         deleted_for_item: list[str] = []

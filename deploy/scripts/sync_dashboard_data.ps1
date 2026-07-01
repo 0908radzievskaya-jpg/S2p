@@ -8,6 +8,8 @@ param(
     [ValidateSet("Minimal", "Full")]
     [string]$Mode = "Minimal",
     [int]$KeepBackups = 7,
+    [bool]$ApplyRemoteDeletions = $true,
+    [string[]]$LocalDeleteRoots = @("reports", "релевантные", "sorted_mail", "_review_ai_tender", "archive"),
     [switch]$NoRestart
 )
 
@@ -41,6 +43,7 @@ $archivePath = Join-Path $env:TEMP "tender-dashboard-data-$stamp.tar.gz"
 $remoteArchivePath = "/tmp/tender-dashboard-data-$stamp.tar.gz"
 $remoteApplyPath = "/tmp/tender-dashboard-apply-data-$stamp.sh"
 $localApplyPath = Join-Path $env:TEMP "tender-dashboard-apply-data-$stamp.sh"
+$localStatePath = Join-Path $env:TEMP "tender-dashboard-state-$stamp.json"
 $stagingRoot = Join-Path $env:TEMP "tender-dashboard-data-staging-$stamp"
 $remote = "${RemoteUser}@${RemoteHost}"
 $restartFlag = if ($NoRestart) { "0" } else { "1" }
@@ -66,6 +69,207 @@ function Add-StagedFile {
     New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
     Copy-Item -LiteralPath $File.FullName -Destination $target -Force
     $Seen[$relative] = $true
+}
+
+$metadataNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+@(
+    "03_document_index.json",
+    "04_project_card.json",
+    "05_tep.json",
+    "06_scope.json",
+    "07_requirements.json",
+    "08_red_flags.json",
+    "09_missing_data.json",
+    "12_analysis_report.json",
+    "14_pir_normative_estimate.json",
+    "batch_index.json",
+    "links.txt",
+    "request_meta.json",
+    "run_summary.json",
+    "source_message_path.txt"
+) | ForEach-Object { [void]$metadataNames.Add($_) }
+
+function Get-LocalDeleteRootPaths {
+    $roots = @()
+    foreach ($rootName in $LocalDeleteRoots) {
+        $path = Join-Path $ProjectRoot $rootName
+        if (Test-Path -LiteralPath $path) {
+            $roots += (Get-Item -LiteralPath $path -Force).FullName.TrimEnd("\", "/")
+        }
+    }
+    return $roots
+}
+
+function Test-PathWithinLocalDeleteRoots {
+    param(
+        [string]$Path,
+        [string[]]$Roots
+    )
+
+    $full = [System.IO.Path]::GetFullPath($Path).TrimEnd("\", "/")
+    foreach ($root in $Roots) {
+        if ($full.Equals($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+        $prefix = $root + [System.IO.Path]::DirectorySeparatorChar
+        if ($full.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Resolve-LocalDeleteCandidate {
+    param([string]$Candidate)
+
+    $text = ($Candidate | Out-String).Trim().Trim('"')
+    if (-not $text -or $text -match "^[a-z][a-z0-9+.-]*://") {
+        return $null
+    }
+    $text = [Environment]::ExpandEnvironmentVariables($text)
+    if (-not [System.IO.Path]::IsPathRooted($text)) {
+        $text = Join-Path $ProjectRoot $text
+    }
+    if (-not (Test-Path -LiteralPath $text)) {
+        return $null
+    }
+    return (Get-Item -LiteralPath $text -Force).FullName
+}
+
+function Test-KeepDashboardMetadata {
+    param([System.IO.FileInfo]$File)
+
+    if ($metadataNames.Contains($File.Name)) {
+        return $true
+    }
+    if ($File.Extension.Equals(".json", [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+    return $false
+}
+
+function Test-DirectoryEmpty {
+    param([string]$Path)
+
+    $child = Get-ChildItem -LiteralPath $Path -Force | Select-Object -First 1
+    return $null -eq $child
+}
+
+function Remove-LocalDashboardFiles {
+    param(
+        [string]$TargetPath,
+        [string[]]$Roots
+    )
+
+    $deleted = 0
+    $item = Get-Item -LiteralPath $TargetPath -Force
+    if (-not (Test-PathWithinLocalDeleteRoots -Path $item.FullName -Roots $Roots)) {
+        return 0
+    }
+
+    if ($item.PSIsContainer) {
+        $files = Get-ChildItem -LiteralPath $item.FullName -Recurse -File -Force | Sort-Object FullName -Descending
+        foreach ($file in $files) {
+            if (-not (Test-PathWithinLocalDeleteRoots -Path $file.FullName -Roots $Roots)) {
+                continue
+            }
+            if (Test-KeepDashboardMetadata -File $file) {
+                continue
+            }
+            Remove-Item -LiteralPath $file.FullName -Force
+            $deleted++
+        }
+        $dirs = Get-ChildItem -LiteralPath $item.FullName -Recurse -Directory -Force | Sort-Object FullName -Descending
+        foreach ($dir in $dirs) {
+            if (-not (Test-PathWithinLocalDeleteRoots -Path $dir.FullName -Roots $Roots)) {
+                continue
+            }
+            if (Test-DirectoryEmpty -Path $dir.FullName) {
+                Remove-Item -LiteralPath $dir.FullName -Force
+            }
+        }
+        if (Test-DirectoryEmpty -Path $item.FullName) {
+            Remove-Item -LiteralPath $item.FullName -Force
+        }
+        return $deleted
+    }
+
+    if ($item -is [System.IO.FileInfo] -and -not (Test-KeepDashboardMetadata -File $item)) {
+        Remove-Item -LiteralPath $item.FullName -Force
+        return 1
+    }
+    return 0
+}
+
+function Add-DeletionCandidate {
+    param(
+        [object]$Value,
+        [System.Collections.Generic.HashSet[string]]$Candidates
+    )
+
+    if ($null -eq $Value) {
+        return
+    }
+    if ($Value -is [System.Array]) {
+        foreach ($item in $Value) {
+            Add-DeletionCandidate -Value $item -Candidates $Candidates
+        }
+        return
+    }
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+        return
+    }
+    $text = ($Value | Out-String).Trim()
+    if ($text) {
+        [void]$Candidates.Add($text)
+    }
+}
+
+function Invoke-RemoteDeletionSync {
+    if (-not $ApplyRemoteDeletions) {
+        return
+    }
+
+    $roots = Get-LocalDeleteRootPaths
+    if ($roots.Count -eq 0) {
+        Write-Warning "No local delete roots exist. Skipping remote deletion sync."
+        return
+    }
+
+    Write-Host "Pulling dashboard deletion decisions from server"
+    & scp @sshArgs "${remote}:$RemoteAppDir/.state/dashboard_statuses.json" $localStatePath
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Could not pull remote dashboard state. Local deletion sync skipped."
+        return
+    }
+
+    $state = Get-Content -LiteralPath $localStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if (-not $state.items) {
+        return
+    }
+
+    $candidates = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($property in $state.items.PSObject.Properties) {
+        $record = $property.Value
+        if (-not $record -or $record.status -ne "not_relevant" -or -not $record.files_deleted_at) {
+            continue
+        }
+        Add-DeletionCandidate -Value $record.deleted_relative_paths -Candidates $candidates
+        Add-DeletionCandidate -Value $record.local_delete_candidates -Candidates $candidates
+    }
+
+    $deleted = 0
+    foreach ($candidate in $candidates) {
+        $target = Resolve-LocalDeleteCandidate -Candidate $candidate
+        if (-not $target) {
+            continue
+        }
+        $deleted += Remove-LocalDashboardFiles -TargetPath $target -Roots $roots
+    }
+
+    if ($deleted -gt 0) {
+        Write-Host "Local dashboard cleanup deleted $deleted file(s)."
+    }
 }
 
 function New-MinimalPackage {
@@ -190,6 +394,8 @@ echo "Dashboard data sync complete."
 '@
 
 try {
+    Invoke-RemoteDeletionSync
+
     if ($Mode -eq "Full") {
         $packageRoot = $ProjectRoot
         $tarRoots = @("reports", "релевантные") | Where-Object {
@@ -234,5 +440,6 @@ try {
 finally {
     Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $localApplyPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $localStatePath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

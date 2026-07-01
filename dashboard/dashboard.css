@@ -348,10 +348,6 @@ tr:not(.row-expanded) .status-option:not(.is-active) {
   background: var(--green-soft);
 }
 
-.row-analyzing {
-  background: var(--amber-soft);
-}
-
 .row-submitting {
   background: #d7f7ee;
 }

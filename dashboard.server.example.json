@@ -19,6 +19,10 @@
     "bitrix_webhook_url": "",
     "bitrix_source_id": "EMAIL",
     "bitrix_responsible_id": "",
+    "bitrix_gip_user_id": "",
+    "bitrix_task_created_by_id": "",
+    "bitrix_task_group_id": "",
+    "bitrix_task_deadline_hours": 24,
     "bitrix_timeout_seconds": 20
   }
 }
