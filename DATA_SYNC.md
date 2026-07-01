@@ -1,0 +1,49 @@
+# Автообновление данных Tender Dashboard
+
+Код панели обновляется на VPS через `tender-dashboard-deploy.timer`. Данные панели не хранятся в Git: их нужно синхронизировать отдельно из локальных папок `reports` и `релевантные`.
+
+## Ручная синхронизация
+
+Из PowerShell на Windows:
+
+```powershell
+.\deploy\scripts\sync_dashboard_data.ps1
+```
+
+Если для SSH используется отдельный ключ:
+
+```powershell
+.\deploy\scripts\sync_dashboard_data.ps1 -SshKeyPath "$env:USERPROFILE\.ssh\id_ed25519"
+```
+
+Скрипт упакует локальные папки `reports` и `релевантные`, загрузит их на `root@194.113.209.237`, заменит серверные папки в `/opt/tender-dashboard`, сохранит backup в `/var/backups/tender-dashboard-data/`, поправит права и проверит `http://127.0.0.1:8765/`.
+
+## Автоматическая синхронизация
+
+Установить задачу Windows Task Scheduler:
+
+```powershell
+.\deploy\scripts\install_windows_data_sync_task.ps1 -EveryMinutes 15 -RunNow
+```
+
+С отдельным SSH-ключом:
+
+```powershell
+.\deploy\scripts\install_windows_data_sync_task.ps1 -EveryMinutes 15 -SshKeyPath "$env:USERPROFILE\.ssh\id_ed25519" -RunNow
+```
+
+После этого Windows будет отправлять свежие данные каждые 15 минут без ручного участия.
+
+## Требования
+
+- На Windows должны быть доступны `ssh`, `scp` и `tar`.
+- Для полностью автоматической работы нужен SSH-доступ без ввода пароля: ключ в `~/.ssh` или ключ, переданный через `-SshKeyPath`.
+- На VPS должен быть установлен Tender Dashboard через `deploy/scripts/install_tender_dashboard.sh`.
+
+## Управление задачей
+
+```powershell
+Get-ScheduledTask -TaskName "Tender Dashboard Data Sync"
+Start-ScheduledTask -TaskName "Tender Dashboard Data Sync"
+Unregister-ScheduledTask -TaskName "Tender Dashboard Data Sync"
+```
