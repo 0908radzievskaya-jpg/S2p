@@ -5,6 +5,8 @@ param(
     [string]$RemoteUser = "root",
     [string]$RemoteAppDir = "/opt/tender-dashboard",
     [string]$SshKeyPath = "",
+    [ValidateSet("Minimal", "Full")]
+    [string]$Mode = "Minimal",
     [int]$KeepBackups = 7,
     [switch]$NoRestart
 )
@@ -25,14 +27,6 @@ Require-Command scp
 Require-Command tar
 
 $ProjectRoot = (Resolve-Path $ProjectRoot).Path
-$dataRoots = @("reports", "релевантные") | Where-Object {
-    Test-Path -LiteralPath (Join-Path $ProjectRoot $_)
-}
-
-if ($dataRoots.Count -eq 0) {
-    throw "No dashboard data folders found. Expected 'reports' or 'релевантные' under $ProjectRoot."
-}
-
 $sshArgs = @("-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new")
 if ($SshKeyPath) {
     $sshArgs = @("-i", $SshKeyPath) + $sshArgs
@@ -43,8 +37,80 @@ $archivePath = Join-Path $env:TEMP "tender-dashboard-data-$stamp.tar.gz"
 $remoteArchivePath = "/tmp/tender-dashboard-data-$stamp.tar.gz"
 $remoteApplyPath = "/tmp/tender-dashboard-apply-data-$stamp.sh"
 $localApplyPath = Join-Path $env:TEMP "tender-dashboard-apply-data-$stamp.sh"
+$stagingRoot = Join-Path $env:TEMP "tender-dashboard-data-staging-$stamp"
 $remote = "${RemoteUser}@${RemoteHost}"
 $restartFlag = if ($NoRestart) { "0" } else { "1" }
+
+function Get-RelativePath {
+    param([string]$Path)
+    $root = (Get-Item -LiteralPath $ProjectRoot).FullName.TrimEnd("\", "/")
+    $full = (Get-Item -LiteralPath $Path).FullName
+    return $full.Substring($root.Length).TrimStart("\", "/")
+}
+
+function Add-StagedFile {
+    param(
+        [System.IO.FileInfo]$File,
+        [hashtable]$Seen
+    )
+
+    $relative = Get-RelativePath -Path $File.FullName
+    if ($Seen.ContainsKey($relative)) {
+        return
+    }
+    $target = Join-Path $stagingRoot $relative
+    New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+    Copy-Item -LiteralPath $File.FullName -Destination $target -Force
+    $Seen[$relative] = $true
+}
+
+function New-MinimalPackage {
+    New-Item -ItemType Directory -Path (Join-Path $stagingRoot "reports") -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $stagingRoot "релевантные") -Force | Out-Null
+
+    $seen = @{}
+    $selectedNamePattern = "(?i)(^заявки_|^report-|тз|техническ|задани|смет|калькуляц|расче[тт]|аналит|записк)"
+    $selectedExtensions = @(".pdf", ".doc", ".docx", ".xls", ".xlsx", ".txt")
+    $analysisMetaNames = @(
+        "03_document_index.json",
+        "04_project_card.json",
+        "05_tep.json",
+        "06_scope.json",
+        "07_requirements.json",
+        "08_red_flags.json",
+        "09_missing_data.json",
+        "12_analysis_report.json",
+        "14_pir_normative_estimate.json",
+        "request_meta.json",
+        "links.txt",
+        "source_message_path.txt"
+    )
+
+    foreach ($rootName in @("reports", "релевантные")) {
+        $rootPath = Join-Path $ProjectRoot $rootName
+        if (-not (Test-Path -LiteralPath $rootPath)) {
+            continue
+        }
+
+        Get-ChildItem -LiteralPath $rootPath -Recurse -File | ForEach-Object {
+            $relative = Get-RelativePath -Path $_.FullName
+            $extension = $_.Extension.ToLowerInvariant()
+            $isDashboardWorkbook = $relative -match "^[\\/]?reports[\\/](Заявки_|report-).+\.xlsx$"
+            $isAnalysisMeta = ($relative -match "^[\\/]?reports[\\/]analysis_") -and ($analysisMetaNames -contains $_.Name)
+            $isSelectedDocument = ($selectedExtensions -contains $extension) -and ($_.Name -match $selectedNamePattern)
+
+            if ($isDashboardWorkbook -or $isAnalysisMeta -or $isSelectedDocument) {
+                Add-StagedFile -File $_ -Seen $seen
+            }
+        }
+    }
+
+    if ($seen.Count -eq 0) {
+        throw "No minimal dashboard files found. Expected reports/Заявки_*.xlsx, analysis JSON, TZ, estimate, or analytic files."
+    }
+
+    return @("reports", "релевантные")
+}
 
 $remoteScript = @'
 #!/usr/bin/env bash
@@ -110,8 +176,22 @@ echo "Dashboard data sync complete."
 '@
 
 try {
-    Write-Host "Packing dashboard data: $($dataRoots -join ', ')"
-    & tar -czf $archivePath -C $ProjectRoot @dataRoots
+    if ($Mode -eq "Full") {
+        $packageRoot = $ProjectRoot
+        $tarRoots = @("reports", "релевантные") | Where-Object {
+            Test-Path -LiteralPath (Join-Path $ProjectRoot $_)
+        }
+        if ($tarRoots.Count -eq 0) {
+            throw "No dashboard data folders found. Expected 'reports' or 'релевантные' under $ProjectRoot."
+        }
+    }
+    else {
+        $packageRoot = $stagingRoot
+        $tarRoots = New-MinimalPackage
+    }
+
+    Write-Host "Packing dashboard data ($Mode): $($tarRoots -join ', ')"
+    & tar -czf $archivePath -C $packageRoot @tarRoots
     if ($LASTEXITCODE -ne 0) {
         throw "tar failed with exit code $LASTEXITCODE"
     }
@@ -140,4 +220,5 @@ try {
 finally {
     Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $localApplyPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

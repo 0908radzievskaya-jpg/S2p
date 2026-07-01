@@ -5,6 +5,8 @@ param(
     [string]$RemoteUser = "root",
     [string]$RemoteAppDir = "/opt/tender-dashboard",
     [string]$SshKeyPath = "",
+    [ValidateSet("Minimal", "Full")]
+    [string]$Mode = "Minimal",
     [string]$TaskName = "Tender Dashboard Data Sync",
     [int]$EveryMinutes = 15,
     [switch]$RunNow
@@ -31,7 +33,8 @@ $arguments = @(
     "-ProjectRoot", "`"$ProjectRoot`"",
     "-RemoteHost", "`"$RemoteHost`"",
     "-RemoteUser", "`"$RemoteUser`"",
-    "-RemoteAppDir", "`"$RemoteAppDir`""
+    "-RemoteAppDir", "`"$RemoteAppDir`"",
+    "-Mode", "`"$Mode`""
 )
 
 if ($SshKeyPath) {
