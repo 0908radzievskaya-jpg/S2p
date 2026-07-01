@@ -18,7 +18,7 @@
 .\deploy\scripts\sync_dashboard_data.ps1 -SshKeyPath "$env:USERPROFILE\.ssh\id_ed25519"
 ```
 
-Скрипт упакует локальные папки `reports` и `релевантные`, загрузит их на `root@194.113.209.237`, заменит серверные папки в `/opt/tender-dashboard`, сохранит backup в `/var/backups/tender-dashboard-data/`, поправит права и проверит `http://127.0.0.1:8765/`.
+Скрипт упакует минимальный набор файлов из локальных папок `reports` и `релевантные`, загрузит его на `root@194.113.209.237`, заменит серверные папки в `/opt/tender-dashboard`, сохранит backup в `/var/backups/tender-dashboard-data/`, поправит права и проверит `http://127.0.0.1:8765/`.
 
 Для разовой полной выгрузки всех данных:
 
@@ -28,19 +28,19 @@
 
 ## Автоматическая синхронизация
 
-Установить задачу Windows Task Scheduler:
+Установить задачу Windows Task Scheduler на ежедневный запуск в 09:00:
 
 ```powershell
-.\deploy\scripts\install_windows_data_sync_task.ps1 -EveryMinutes 15 -RunNow
+.\deploy\scripts\install_windows_data_sync_task.ps1 -DailyAt 09:00 -RunNow
 ```
 
 С отдельным SSH-ключом:
 
 ```powershell
-.\deploy\scripts\install_windows_data_sync_task.ps1 -EveryMinutes 15 -SshKeyPath "$env:USERPROFILE\.ssh\id_ed25519" -RunNow
+.\deploy\scripts\install_windows_data_sync_task.ps1 -DailyAt 09:00 -SshKeyPath "$env:USERPROFILE\.ssh\id_ed25519" -RunNow
 ```
 
-После этого Windows будет отправлять свежие данные каждые 15 минут без ручного участия.
+После этого Windows будет отправлять свежие данные каждый день в 09:00 без ручного участия. Если предыдущая синхронизация еще выполняется, новый запуск будет пропущен; максимальное время одного запуска по умолчанию — 120 минут.
 
 ## Требования
 

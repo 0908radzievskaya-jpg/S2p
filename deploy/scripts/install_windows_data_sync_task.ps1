@@ -8,15 +8,27 @@ param(
     [ValidateSet("Minimal", "Full")]
     [string]$Mode = "Minimal",
     [string]$TaskName = "Tender Dashboard Data Sync",
-    [int]$EveryMinutes = 15,
+    [string]$DailyAt = "09:00",
+    [int]$EveryMinutes = 0,
+    [int]$MaxRunMinutes = 120,
     [switch]$RunNow
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-if ($EveryMinutes -lt 1) {
-    throw "EveryMinutes must be greater than 0."
+if ($EveryMinutes -lt 0) {
+    throw "EveryMinutes must be 0 or greater."
+}
+if ($MaxRunMinutes -lt 1) {
+    throw "MaxRunMinutes must be greater than 0."
+}
+
+$culture = [System.Globalization.CultureInfo]::InvariantCulture
+$parsedDailyAt = [datetime]::MinValue
+$dailyAtFormats = [string[]]@("H:mm", "HH:mm")
+if (-not [datetime]::TryParseExact($DailyAt, $dailyAtFormats, $culture, [System.Globalization.DateTimeStyles]::None, [ref]$parsedDailyAt)) {
+    throw "DailyAt must be in HH:mm format, for example 09:00."
 }
 
 $ProjectRoot = (Resolve-Path $ProjectRoot).Path
@@ -42,14 +54,22 @@ if ($SshKeyPath) {
 }
 
 $action = New-ScheduledTaskAction -Execute $pwsh -Argument ($arguments -join " ") -WorkingDirectory $ProjectRoot
-$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
-    -RepetitionInterval (New-TimeSpan -Minutes $EveryMinutes) `
-    -RepetitionDuration (New-TimeSpan -Days 3650)
+if ($EveryMinutes -gt 0) {
+    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
+        -RepetitionInterval (New-TimeSpan -Minutes $EveryMinutes) `
+        -RepetitionDuration (New-TimeSpan -Days 3650)
+    $scheduleDescription = "every $EveryMinutes minutes"
+}
+else {
+    $trigger = New-ScheduledTaskTrigger -Daily -At ((Get-Date).Date.Add($parsedDailyAt.TimeOfDay))
+    $scheduleDescription = "daily at $DailyAt"
+}
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
     -MultipleInstances IgnoreNew `
-    -StartWhenAvailable
+    -StartWhenAvailable `
+    -ExecutionTimeLimit (New-TimeSpan -Minutes $MaxRunMinutes)
 
 Register-ScheduledTask `
     -TaskName $TaskName `
@@ -60,7 +80,8 @@ Register-ScheduledTask `
     -Force | Out-Null
 
 Write-Host "Scheduled task installed: $TaskName"
-Write-Host "Interval: every $EveryMinutes minutes"
+Write-Host "Schedule: $scheduleDescription"
+Write-Host "Max run time: $MaxRunMinutes minutes"
 
 if ($RunNow) {
     Start-ScheduledTask -TaskName $TaskName
