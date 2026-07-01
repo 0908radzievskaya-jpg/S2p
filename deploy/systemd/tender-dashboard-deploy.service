@@ -1,0 +1,12 @@
+[Unit]
+Description=Deploy Tender Dashboard from GitHub
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=APP_DIR=/opt/tender-dashboard
+Environment=APP_USER=tender-dashboard
+Environment=BRANCH=codex/s2p
+Environment=HEALTH_URL=http://127.0.0.1:8765/
+ExecStart=/opt/tender-dashboard/deploy/scripts/deploy_tender_dashboard.sh

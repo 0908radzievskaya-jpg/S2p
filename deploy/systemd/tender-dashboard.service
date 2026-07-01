@@ -1,0 +1,29 @@
+[Unit]
+Description=Tender Dashboard
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=tender-dashboard
+Group=tender-dashboard
+WorkingDirectory=/opt/tender-dashboard
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/etc/tender-dashboard/tender-dashboard.env
+ExecStart=/opt/tender-dashboard/.venv/bin/python /opt/tender-dashboard/tender_dashboard.py serve --config /opt/tender-dashboard/dashboard.server.json --host 127.0.0.1 --port 8765
+Restart=on-failure
+RestartSec=5
+UMask=0027
+LogsDirectory=tender-dashboard
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/opt/tender-dashboard /var/log/tender-dashboard
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
