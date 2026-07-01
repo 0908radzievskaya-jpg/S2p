@@ -163,7 +163,17 @@ if [ "$RESTART" = "1" ]; then
     systemctl restart tender-dashboard.service
 fi
 
-http_code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:8765/ || true)"
+http_code="000"
+for attempt in $(seq 1 30); do
+    http_code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:8765/ || true)"
+    case "$http_code" in
+        200|401)
+            break
+            ;;
+    esac
+    sleep 2
+done
+
 case "$http_code" in
     200|401)
         echo "Dashboard health OK: HTTP $http_code"
