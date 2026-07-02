@@ -1566,9 +1566,14 @@ def technical_assignment_paths(item: DashboardItem) -> list[str]:
         text = clean_text(value)
         if not text or re.match(r"^[a-z][a-z0-9+.-]*://", text, flags=re.IGNORECASE):
             continue
+        if os.name != "nt" and re.match(r"^[A-Za-z]:[\\/]", text):
+            continue
         path = Path(text)
-        if path.exists() and path.is_file():
-            candidates[str(path.resolve())] = path.resolve()
+        try:
+            if path.exists() and path.is_file():
+                candidates[str(path.resolve())] = path.resolve()
+        except OSError:
+            continue
 
     for base in item_specific_material_dirs(item):
         try:
