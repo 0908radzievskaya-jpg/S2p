@@ -39,6 +39,7 @@
 - `dashboard.state_path` — файл, где сохраняются решения менеджера по закупкам;
 - `dashboard.file_retention_days` — через сколько дней удалять скачанные файлы для закупок без статуса `Релевантна` или `В работе`;
 - `dashboard.file_link_mode` — режим ссылок на файлы: `local` открывает локальный/сетевой путь, `download` отдает файлы и ZIP-папки через серверный `/api/download`;
+- `dashboard.min_nmc_rub` — минимальная НМЦК для показа в dashboard, по умолчанию `1500000`. Закупки с распознанной НМЦК ниже порога скрываются, закупки без цены остаются в списке;
 - `dashboard.relevant_excel_globs` — Excel-таблицы с AI-релевантными закупками, по умолчанию `reports/Заявки_*.xlsx`;
 - `dashboard.local_path_prefix` и `dashboard.network_path_prefix` — замена локального пути на путь на диске `Z:` в ссылках dashboard;
 - `dashboard.auth_username`, `dashboard.auth_password` — опциональная Basic Auth для online-размещения. Также можно задать переменные окружения `TENDER_DASHBOARD_USER` и `TENDER_DASHBOARD_PASSWORD`;

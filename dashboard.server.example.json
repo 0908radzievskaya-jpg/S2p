@@ -10,6 +10,7 @@
     "state_path": ".state/dashboard_statuses.json",
     "file_retention_days": 3,
     "file_link_mode": "download",
+    "min_nmc_rub": 1500000,
     "relevant_excel_globs": [
       "reports/Заявки_*.xlsx"
     ],

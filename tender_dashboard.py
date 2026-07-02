@@ -79,6 +79,7 @@ DASHBOARD_DISPLAY_HEADERS = [
     "Рекомендация следующего действия",
     "Папка материалов",
 ]
+DEFAULT_MIN_NMC_RUB = 1_500_000
 
 DOWNLOAD_DIR_NAMES = {"downloads", "downloads_refreshed", "01_downloaded_docs"}
 METADATA_FILENAMES = {
@@ -1491,6 +1492,50 @@ def procurement_nmc(item: DashboardItem) -> str:
     return extract_nmc_from_text(read_item_request_text(item))
 
 
+def rub_amount_from_text(value: str) -> float | None:
+    text = clean_text(value)
+    if not text or re.search(r"без указания цены", text, flags=re.IGNORECASE):
+        return None
+    match = re.search(r"\d[\d\s.,]*", text)
+    if not match:
+        return None
+    raw = re.sub(r"\s+", "", match.group(0))
+    if "," in raw:
+        whole, fraction = raw.rsplit(",", 1)
+        if 0 < len(fraction) <= 2:
+            normalized = re.sub(r"\D", "", whole) + "." + re.sub(r"\D", "", fraction)
+        else:
+            normalized = re.sub(r"\D", "", raw)
+    elif "." in raw:
+        whole, fraction = raw.rsplit(".", 1)
+        if 0 < len(fraction) <= 2:
+            normalized = re.sub(r"\D", "", whole) + "." + re.sub(r"\D", "", fraction)
+        else:
+            normalized = re.sub(r"\D", "", raw)
+    else:
+        normalized = re.sub(r"\D", "", raw)
+    try:
+        return float(normalized) if normalized else None
+    except ValueError:
+        return None
+
+
+def dashboard_min_nmc_rub(config: dict[str, Any]) -> float:
+    raw = dashboard_config(config).get("min_nmc_rub", DEFAULT_MIN_NMC_RUB)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return float(DEFAULT_MIN_NMC_RUB)
+
+
+def dashboard_item_visible_by_nmc(item: DashboardItem, config: dict[str, Any]) -> bool:
+    minimum = dashboard_min_nmc_rub(config)
+    if minimum <= 0:
+        return True
+    amount = rub_amount_from_text(procurement_nmc(item))
+    return amount is None or amount >= minimum
+
+
 def procurement_customer(item: DashboardItem) -> str:
     value = first_column(item.columns, ("Заказчик", "Заказчик/отправитель"))
     if not value:
@@ -1832,11 +1877,15 @@ def dashboard_payload(config: dict[str, Any], config_path: Path) -> dict[str, An
     changed = apply_state(items, state, mutate=True)
     if changed:
         save_state(config, config_path, state)
+    all_items = items
+    items = [item for item in all_items if dashboard_item_visible_by_nmc(item, config)]
     items.sort(key=item_sort_key)
     headers = headers_for_items(items)
     serialised = [serialise_item(item, config, headers) for item in items]
     stats = {
         "total": len(items),
+        "excludedByNmc": len(all_items) - len(items),
+        "minNmcRub": dashboard_min_nmc_rub(config),
         "new": sum(1 for item in items if item.is_new),
         "unchecked": sum(1 for item in items if item.status == "unchecked"),
         "notRelevant": sum(1 for item in items if item.status == "not_relevant"),
