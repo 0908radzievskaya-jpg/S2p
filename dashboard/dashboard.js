@@ -4,6 +4,7 @@ const state = {
   date: "all",
   status: "all",
   expandedRows: new Set(),
+  integrations: null,
 };
 
 const statusOrder = ["unchecked", "relevant", "submitting", "not_relevant"];
@@ -18,6 +19,14 @@ const els = {
   searchInput: document.getElementById("searchInput"),
   dateFilter: document.getElementById("dateFilter"),
   statusFilter: document.getElementById("statusFilter"),
+  integrationsBtn: document.getElementById("integrationsBtn"),
+  integrationsModal: document.getElementById("integrationsModal"),
+  integrationsCloseBtn: document.getElementById("integrationsCloseBtn"),
+  integrationsReloadBtn: document.getElementById("integrationsReloadBtn"),
+  integrationsForm: document.getElementById("integrationsForm"),
+  integrationsFields: document.getElementById("integrationsFields"),
+  integrationsStatus: document.getElementById("integrationsStatus"),
+  integrationsEnvPath: document.getElementById("integrationsEnvPath"),
   refreshBtn: document.getElementById("refreshBtn"),
   cleanupBtn: document.getElementById("cleanupBtn"),
   toast: document.getElementById("toast"),
@@ -48,6 +57,58 @@ function showToast(message) {
   els.toast.classList.add("is-visible");
   window.clearTimeout(showToast.timer);
   showToast.timer = window.setTimeout(() => els.toast.classList.remove("is-visible"), 4200);
+}
+
+function setIntegrationsModalOpen(open) {
+  els.integrationsModal.hidden = !open;
+}
+
+async function openIntegrationsModal() {
+  setIntegrationsModalOpen(true);
+  await loadIntegrations();
+}
+
+async function loadIntegrations() {
+  els.integrationsStatus.textContent = "Загрузка";
+  els.integrationsFields.replaceChildren();
+  const payload = await fetchJson("/api/integrations");
+  state.integrations = payload;
+  renderIntegrations(payload);
+}
+
+function renderIntegrations(payload) {
+  const envFile = payload.envFile || {};
+  els.integrationsEnvPath.textContent = envFile.path || "";
+  els.integrationsStatus.textContent = envFile.writable
+    ? "Хранилище доступно для записи"
+    : "Хранилище недоступно для записи";
+  els.integrationsFields.replaceChildren();
+  for (const [key, field] of Object.entries(payload.fields || {})) {
+    const label = make("label", "secret-field");
+    const labelLine = make("div", "secret-field-label");
+    labelLine.append(make("span", "", field.label || key));
+    labelLine.append(make("span", `status-pill ${field.configured ? "is-set" : "is-missing"}`, field.configured ? "задано" : "не задано"));
+
+    const input = document.createElement("input");
+    input.name = key;
+    input.type = field.secret ? "password" : "text";
+    input.autocomplete = field.secret ? "new-password" : "off";
+    input.placeholder = field.configured ? "оставить без изменений" : "";
+    input.disabled = !envFile.writable;
+
+    label.append(labelLine, input);
+    els.integrationsFields.append(label);
+  }
+}
+
+function integrationFieldsFromForm() {
+  const fields = {};
+  const formData = new FormData(els.integrationsForm);
+  for (const [key, value] of formData.entries()) {
+    const text = String(value || "").trim();
+    if (text) fields[key] = text;
+  }
+  return fields;
 }
 
 async function fetchJson(url, options = {}) {
@@ -431,6 +492,59 @@ els.dateFilter.addEventListener("change", () => {
 els.statusFilter.addEventListener("change", () => {
   state.status = els.statusFilter.value;
   render();
+});
+
+els.integrationsBtn.addEventListener("click", async () => {
+  try {
+    await openIntegrationsModal();
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+
+els.integrationsCloseBtn.addEventListener("click", () => {
+  setIntegrationsModalOpen(false);
+});
+
+els.integrationsReloadBtn.addEventListener("click", async () => {
+  try {
+    await loadIntegrations();
+    showToast("Статус интеграций обновлен");
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+
+els.integrationsModal.addEventListener("click", (event) => {
+  if (event.target === els.integrationsModal) {
+    setIntegrationsModalOpen(false);
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !els.integrationsModal.hidden) {
+    setIntegrationsModalOpen(false);
+  }
+});
+
+els.integrationsForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const fields = integrationFieldsFromForm();
+  if (!Object.keys(fields).length) {
+    showToast("Введите хотя бы одно новое значение");
+    return;
+  }
+  try {
+    const result = await fetchJson("/api/integrations", {
+      method: "POST",
+      body: JSON.stringify({ fields }),
+    });
+    renderIntegrations(result.status);
+    els.integrationsForm.reset();
+    showToast("Настройки интеграций сохранены");
+  } catch (error) {
+    showToast(error.message);
+  }
 });
 
 els.refreshBtn.addEventListener("click", async () => {

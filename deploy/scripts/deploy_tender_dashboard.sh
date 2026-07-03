@@ -3,10 +3,12 @@ set -Eeuo pipefail
 
 APP_DIR="${APP_DIR:-/opt/tender-dashboard}"
 APP_USER="${APP_USER:-tender-dashboard}"
+APP_GROUP="${APP_GROUP:-$APP_USER}"
 BRANCH="${BRANCH:-codex/s2p}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8765/}"
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/tender-dashboard}"
 ENV_FILE="${ENV_FILE:-/etc/tender-dashboard/tender-dashboard.env}"
+ENV_DIR="$(dirname "$ENV_FILE")"
 
 log() {
     printf '[%s] %s\n' "$(date -Is)" "$*"
@@ -49,6 +51,18 @@ run_as_app git -C "$APP_DIR" merge --ff-only "origin/$BRANCH"
 if [ -f "$APP_DIR/requirements.txt" ]; then
     run_as_app "$APP_DIR/.venv/bin/python" -m pip install --upgrade -r "$APP_DIR/requirements.txt"
 fi
+
+install -d -m 0750 -o root -g "$APP_GROUP" "$ENV_DIR"
+if [ -f "$ENV_FILE" ]; then
+    chown root:"$APP_GROUP" "$ENV_FILE"
+    chmod 0660 "$ENV_FILE"
+fi
+
+install -m 0644 "$APP_DIR/deploy/systemd/tender-dashboard.service" /etc/systemd/system/tender-dashboard.service
+install -m 0644 "$APP_DIR/deploy/systemd/tender-dashboard-deploy.service" /etc/systemd/system/tender-dashboard-deploy.service
+install -m 0644 "$APP_DIR/deploy/systemd/tender-dashboard-deploy.timer" /etc/systemd/system/tender-dashboard-deploy.timer
+chmod +x "$APP_DIR/deploy/scripts/deploy_tender_dashboard.sh"
+systemctl daemon-reload
 
 run_as_app "$APP_DIR/.venv/bin/python" -m py_compile "$APP_DIR/tender_dashboard.py" "$APP_DIR/mail_automation.py"
 

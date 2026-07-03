@@ -143,10 +143,12 @@ TENDER_DASHBOARD_USER=$(escape_env_value "$dashboard_user")
 TENDER_DASHBOARD_PASSWORD=$(escape_env_value "$dashboard_password")
 EOF
     chown root:"$APP_GROUP" "$ENV_FILE"
-    chmod 0640 "$ENV_FILE"
+    chmod 0660 "$ENV_FILE"
 else
     dashboard_user="$(grep -E '^TENDER_DASHBOARD_USER=' "$ENV_FILE" | cut -d= -f2- || true)"
     dashboard_password="existing password in $ENV_FILE"
+    chown root:"$APP_GROUP" "$ENV_FILE"
+    chmod 0660 "$ENV_FILE"
 fi
 
 install -d -m 0755 /var/log/tender-dashboard

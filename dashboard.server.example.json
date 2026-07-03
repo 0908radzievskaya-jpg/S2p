@@ -19,6 +19,7 @@
     "include_archive_root": false,
     "auth_username": "",
     "auth_password": "",
+    "bitrix_portal_url": "https://bitrix24.mv-proekt.ru/",
     "bitrix_webhook_url": "",
     "bitrix_source_id": "EMAIL",
     "bitrix_responsible_id": "",

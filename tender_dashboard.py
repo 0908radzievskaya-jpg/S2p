@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import datetime as dt
+import getpass
 import hmac
 import hashlib
 import html
@@ -13,6 +14,7 @@ import os
 import posixpath
 import re
 import shutil
+import shlex
 import subprocess
 import sys
 import urllib.parse
@@ -80,6 +82,20 @@ DASHBOARD_DISPLAY_HEADERS = [
     "Папка материалов",
 ]
 DEFAULT_MIN_NMC_RUB = 1_500_000
+INTEGRATION_ENV_FIELDS = {
+    "TENDER_DASHBOARD_USER": {"label": "Логин dashboard", "secret": False},
+    "TENDER_DASHBOARD_PASSWORD": {"label": "Пароль dashboard", "secret": True},
+    "TENDER360_BASE_URL": {"label": "Tender360 URL", "secret": False},
+    "TENDER360_USERNAME": {"label": "Логин Tender360", "secret": False},
+    "TENDER360_PASSWORD": {"label": "Пароль Tender360", "secret": True},
+    "TENDER360_API_TOKEN": {"label": "API token Tender360", "secret": True},
+    "TENDER_DASHBOARD_BITRIX_PORTAL_URL": {"label": "Портал Bitrix24", "secret": False},
+    "TENDER_DASHBOARD_BITRIX_WEBHOOK_URL": {"label": "Webhook Bitrix24", "secret": True},
+    "TENDER_DASHBOARD_BITRIX_RESPONSIBLE_ID": {"label": "ID ответственного CRM", "secret": False},
+    "TENDER_DASHBOARD_BITRIX_GIP_USER_ID": {"label": "ID ГИПа в Bitrix24", "secret": False},
+    "TENDER_DASHBOARD_BITRIX_TASK_CREATED_BY_ID": {"label": "ID автора задачи", "secret": False},
+    "TENDER_DASHBOARD_BITRIX_TASK_GROUP_ID": {"label": "ID группы задач", "secret": False},
+}
 
 DOWNLOAD_DIR_NAMES = {"downloads", "downloads_refreshed", "01_downloaded_docs"}
 METADATA_FILENAMES = {
@@ -237,6 +253,149 @@ def save_state(config: dict[str, Any], config_path: Path, state: dict[str, Any])
     path = configured_state_path(config, config_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def integration_env_path(config: dict[str, Any], config_path: Path, explicit_path: str = "") -> Path:
+    if explicit_path:
+        return resolve_path(explicit_path, config_path.parent)
+    dash = dashboard_config(config)
+    configured = clean_text(dash.get("secrets_env_path") or os.environ.get("TENDER_DASHBOARD_ENV_FILE"))
+    if configured:
+        return resolve_path(configured, config_path.parent)
+    if os.name == "nt":
+        return config_path.parent / ".state" / "tender-dashboard.env"
+    return Path("/etc/tender-dashboard/tender-dashboard.env")
+
+
+def parse_env_file(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        try:
+            tokens = shlex.split(stripped, comments=True, posix=True)
+        except ValueError:
+            tokens = [stripped]
+        for token in tokens:
+            if "=" not in token:
+                continue
+            key, value = token.split("=", 1)
+            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+                values[key] = value
+            break
+    return values
+
+
+def quote_env_value(value: str) -> str:
+    text = clean_text(value)
+    if "\n" in text or "\r" in text or "\x00" in text:
+        raise ValueError("Значение переменной не может содержать перенос строки")
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def write_env_file(path: Path, values: dict[str, str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ordered_keys = sorted(values)
+    body = "\n".join(f"{key}={quote_env_value(values[key])}" for key in ordered_keys) + "\n"
+    path.write_text(body, encoding="utf-8")
+    try:
+        os.chmod(path, 0o660)
+    except OSError:
+        pass
+
+
+def env_write_status(path: Path) -> dict[str, Any]:
+    parent = path.parent
+    exists = path.exists()
+    parent_exists = parent.exists()
+    writable = (exists and os.access(path, os.W_OK)) or (not exists and parent_exists and os.access(parent, os.W_OK))
+    return {
+        "path": str(path),
+        "exists": exists,
+        "writable": writable,
+    }
+
+
+def integration_config_value(key: str, config: dict[str, Any]) -> str:
+    dash = dashboard_config(config)
+    mapping = {
+        "TENDER_DASHBOARD_USER": dash.get("auth_username"),
+        "TENDER_DASHBOARD_PASSWORD": dash.get("auth_password"),
+        "TENDER_DASHBOARD_BITRIX_PORTAL_URL": dash.get("bitrix_portal_url"),
+        "TENDER_DASHBOARD_BITRIX_WEBHOOK_URL": dash.get("bitrix_webhook_url") or config.get("bitrix_webhook_url"),
+        "TENDER_DASHBOARD_BITRIX_RESPONSIBLE_ID": dash.get("bitrix_responsible_id"),
+        "TENDER_DASHBOARD_BITRIX_GIP_USER_ID": dash.get("bitrix_gip_user_id") or dash.get("bitrix_task_responsible_id"),
+        "TENDER_DASHBOARD_BITRIX_TASK_CREATED_BY_ID": dash.get("bitrix_task_created_by_id"),
+        "TENDER_DASHBOARD_BITRIX_TASK_GROUP_ID": dash.get("bitrix_task_group_id"),
+    }
+    return clean_text(mapping.get(key))
+
+
+def integrations_status(config: dict[str, Any], config_path: Path, explicit_path: str = "") -> dict[str, Any]:
+    path = integration_env_path(config, config_path, explicit_path)
+    values = parse_env_file(path)
+    fields = {}
+    for key, meta in INTEGRATION_ENV_FIELDS.items():
+        value = values.get(key) or os.environ.get(key, "") or integration_config_value(key, config)
+        fields[key] = {
+            "label": meta["label"],
+            "secret": bool(meta["secret"]),
+            "configured": bool(clean_text(value)),
+        }
+    return {"envFile": env_write_status(path), "fields": fields}
+
+
+def save_integrations(
+    payload: dict[str, Any],
+    config: dict[str, Any],
+    config_path: Path,
+    explicit_path: str = "",
+) -> dict[str, Any]:
+    path = integration_env_path(config, config_path, explicit_path)
+    values = parse_env_file(path)
+    fields_payload = payload.get("fields", payload)
+    if not isinstance(fields_payload, dict):
+        raise ValueError("Некорректный payload")
+    updated: list[str] = []
+    for key in INTEGRATION_ENV_FIELDS:
+        if key not in fields_payload:
+            continue
+        value = clean_text(fields_payload.get(key))
+        if not value:
+            continue
+        values[key] = value
+        os.environ[key] = value
+        updated.append(key)
+    if not updated:
+        raise ValueError("Нет новых значений для сохранения")
+    write_env_file(path, values)
+    return {"saved": True, "updated": updated, "envFile": env_write_status(path)}
+
+
+def configure_integrations_interactive(config: dict[str, Any], config_path: Path, explicit_path: str = "") -> dict[str, Any]:
+    path = integration_env_path(config, config_path, explicit_path)
+    current = integrations_status(config, config_path, explicit_path)
+    print(f"Env file: {path}")
+    print("Пустой ввод оставляет текущее значение без изменений.")
+    fields: dict[str, str] = {}
+    for key, meta in INTEGRATION_ENV_FIELDS.items():
+        status = "задано" if current["fields"][key]["configured"] else "не задано"
+        prompt = f"{meta['label']} ({key}, сейчас: {status}): "
+        if meta["secret"]:
+            value = getpass.getpass(prompt)
+        else:
+            value = input(prompt)
+        value = clean_text(value)
+        if value:
+            fields[key] = value
+    if not fields:
+        return {"saved": False, "message": "Новые значения не введены", "envFile": env_write_status(path)}
+    result = save_integrations({"fields": fields}, config, config_path, explicit_path)
+    result["status"] = integrations_status(config, config_path, explicit_path)
+    return result
 
 
 def stable_id(kind: str, basis: str) -> str:
@@ -2153,9 +2312,17 @@ def bitrix_task_deadline(dash: dict[str, Any]) -> str:
 
 def push_item_to_bitrix(item: DashboardItem, record: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     dash = dashboard_config(config)
-    webhook = clean_text(dash.get("bitrix_webhook_url") or config.get("bitrix_webhook_url"))
+    webhook = clean_text(
+        os.environ.get("TENDER_DASHBOARD_BITRIX_WEBHOOK_URL")
+        or dash.get("bitrix_webhook_url")
+        or config.get("bitrix_webhook_url")
+    )
     if not webhook:
-        record["bitrix_error"] = "Не задан dashboard.bitrix_webhook_url"
+        portal = clean_text(os.environ.get("TENDER_DASHBOARD_BITRIX_PORTAL_URL") or dash.get("bitrix_portal_url"))
+        record["bitrix_error"] = (
+            "Не задан TENDER_DASHBOARD_BITRIX_WEBHOOK_URL"
+            + (f" для портала {portal}" if portal else "")
+        )
         return {"status": "not_configured", "message": record["bitrix_error"]}
 
     columns = item.columns
@@ -2196,7 +2363,7 @@ def push_item_to_bitrix(item: DashboardItem, record: dict[str, Any], config: dic
     }
     if customer:
         fields["fields[COMPANY_TITLE]"] = customer
-    responsible_id = clean_text(dash.get("bitrix_responsible_id"))
+    responsible_id = clean_text(os.environ.get("TENDER_DASHBOARD_BITRIX_RESPONSIBLE_ID") or dash.get("bitrix_responsible_id"))
     if responsible_id:
         fields["fields[ASSIGNED_BY_ID]"] = responsible_id
 
@@ -2251,8 +2418,10 @@ def push_bitrix_gip_task(
 
     dash = dashboard_config(config)
     gip_user_id = clean_text(
-        dash.get("bitrix_gip_user_id")
+        os.environ.get("TENDER_DASHBOARD_BITRIX_GIP_USER_ID")
+        or dash.get("bitrix_gip_user_id")
         or dash.get("bitrix_task_responsible_id")
+        or os.environ.get("TENDER_DASHBOARD_BITRIX_RESPONSIBLE_ID")
         or dash.get("bitrix_responsible_id")
     )
     if not gip_user_id:
@@ -2274,10 +2443,10 @@ def push_bitrix_gip_task(
         "fields[RESPONSIBLE_ID]": gip_user_id,
         "fields[UF_CRM_TASK][]": [f"L_{lead_id}"],
     }
-    created_by = clean_text(dash.get("bitrix_task_created_by_id"))
+    created_by = clean_text(os.environ.get("TENDER_DASHBOARD_BITRIX_TASK_CREATED_BY_ID") or dash.get("bitrix_task_created_by_id"))
     if created_by:
         fields["fields[CREATED_BY]"] = created_by
-    group_id = clean_text(dash.get("bitrix_task_group_id"))
+    group_id = clean_text(os.environ.get("TENDER_DASHBOARD_BITRIX_TASK_GROUP_ID") or dash.get("bitrix_task_group_id"))
     if group_id:
         fields["fields[GROUP_ID]"] = group_id
     deadline = bitrix_task_deadline(dash)
@@ -2435,8 +2604,8 @@ def send_static(handler: BaseHTTPRequestHandler, path: Path) -> None:
 
 def dashboard_auth_credentials(config: dict[str, Any]) -> tuple[str, str] | None:
     dash = dashboard_config(config)
-    username = clean_text(dash.get("auth_username") or os.environ.get("TENDER_DASHBOARD_USER"))
-    password = clean_text(dash.get("auth_password") or os.environ.get("TENDER_DASHBOARD_PASSWORD"))
+    username = clean_text(os.environ.get("TENDER_DASHBOARD_USER") or dash.get("auth_username"))
+    password = clean_text(os.environ.get("TENDER_DASHBOARD_PASSWORD") or dash.get("auth_password"))
     if not username and not password:
         return None
     if not username or not password:
@@ -2487,6 +2656,9 @@ def make_handler(config: dict[str, Any], config_path: Path) -> type[BaseHTTPRequ
             if route == "/api/items":
                 send_json(self, dashboard_payload(config, config_path))
                 return
+            if route == "/api/integrations":
+                send_json(self, integrations_status(config, config_path))
+                return
             if route == "/api/download":
                 query = urllib.parse.parse_qs(parsed.query)
                 try:
@@ -2531,6 +2703,12 @@ def make_handler(config: dict[str, Any], config_path: Path) -> type[BaseHTTPRequ
                 if parts == ["api", "open-path"]:
                     payload = read_request_json(self)
                     send_json(self, open_dashboard_path(clean_text(payload.get("path"))))
+                    return
+                if parts == ["api", "integrations"]:
+                    payload = read_request_json(self)
+                    result = save_integrations(payload, config, config_path)
+                    result["status"] = integrations_status(config, config_path)
+                    send_json(self, result)
                     return
                 if len(parts) == 4 and parts[0] == "api" and parts[1] == "items" and parts[3] == "status":
                     payload = read_request_json(self)
@@ -2581,11 +2759,12 @@ def export_payload(config: dict[str, Any], config_path: Path, output_path: Path)
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Dashboard по входящим закупкам")
-    parser.add_argument("command", nargs="?", choices=("serve", "cleanup", "export"), default="serve")
+    parser.add_argument("command", nargs="?", choices=("serve", "cleanup", "export", "configure-secrets"), default="serve")
     parser.add_argument("--config", default="config.json")
     parser.add_argument("--host")
     parser.add_argument("--port", type=int)
     parser.add_argument("--output", default=str(STATIC_ROOT / "dashboard-data.json"))
+    parser.add_argument("--env-file", default="")
     args = parser.parse_args(argv)
 
     config_path = resolve_path(args.config)
@@ -2597,6 +2776,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "export":
         print(json.dumps(export_payload(config, config_path, resolve_path(args.output)), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "configure-secrets":
+        print(json.dumps(configure_integrations_interactive(config, config_path, args.env_file), ensure_ascii=False, indent=2))
         return 0
 
     host = args.host or clean_text(dash.get("host")) or "127.0.0.1"

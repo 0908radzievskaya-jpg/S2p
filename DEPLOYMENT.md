@@ -67,10 +67,17 @@ nano /opt/tender-dashboard/dashboard.server.json
 systemctl restart tender-dashboard
 ```
 
-Basic Auth лучше менять через environment-файл:
+Basic Auth и интеграции можно менять в dashboard через кнопку `Интеграции`. Секреты сохраняются в environment-файл:
 
 ```bash
 nano /etc/tender-dashboard/tender-dashboard.env
+systemctl restart tender-dashboard
+```
+
+Резервная интерактивная команда без браузера:
+
+```bash
+/opt/tender-dashboard/.venv/bin/python /opt/tender-dashboard/tender_dashboard.py configure-secrets --config /opt/tender-dashboard/dashboard.server.json
 systemctl restart tender-dashboard
 ```
 

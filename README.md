@@ -43,7 +43,7 @@
 - `dashboard.relevant_excel_globs` — Excel-таблицы с AI-релевантными закупками, по умолчанию `reports/Заявки_*.xlsx`;
 - `dashboard.local_path_prefix` и `dashboard.network_path_prefix` — замена локального пути на путь на диске `Z:` в ссылках dashboard;
 - `dashboard.auth_username`, `dashboard.auth_password` — опциональная Basic Auth для online-размещения. Также можно задать переменные окружения `TENDER_DASHBOARD_USER` и `TENDER_DASHBOARD_PASSWORD`;
-- `dashboard.bitrix_webhook_url` — входящий webhook Bitrix24. Если он не задан, статус `Релевантна` сохраняется, но лид и задача не создаются;
+- `dashboard.bitrix_webhook_url` — входящий webhook Bitrix24. Если он не задан, статус `Релевантна` сохраняется, но лид и задача не создаются. На сервере webhook и ID пользователей можно хранить в `/etc/tender-dashboard/tender-dashboard.env` или вводить через кнопку `Интеграции`;
 - `dashboard.bitrix_gip_user_id` — ID пользователя Bitrix24, которому ставится задача на оценку ГИПу. Если не задан, используется `dashboard.bitrix_task_responsible_id` или `dashboard.bitrix_responsible_id`;
 - `dashboard.include_archive_root` — включать ли общий `archive/` в сканирование dashboard. По умолчанию dashboard берет `релевантные/` и глубокие анализы из `reports/analysis_*`.
 
@@ -66,6 +66,12 @@ Dashboard показывает только закупки из Excel-табли
 - `Подаемся` — переносит закупку в блок `В работе` на dashboard.
 
 При выборе `Релевантна` сервер пытается создать входящий лид в Bitrix24 через `dashboard.bitrix_webhook_url`, затем задачу через `tasks.task.add`. Если webhook или ID ГИПа не настроены, решение сохранится, а в строке появится предупреждение.
+
+Серверные пароли и интеграции можно менять из dashboard кнопкой `Интеграции`. Пустые поля не перезаписывают уже сохраненные значения, а старые секреты не показываются обратно в браузер. Резервная команда на сервере:
+
+```bash
+/opt/tender-dashboard/.venv/bin/python /opt/tender-dashboard/tender_dashboard.py configure-secrets --config /opt/tender-dashboard/dashboard.server.json
+```
 
 Запуск:
 

@@ -14,6 +14,7 @@
           <div class="meta-line" id="generatedAt">Загрузка</div>
         </div>
         <div class="topbar-actions">
+          <button class="button" id="integrationsBtn" type="button">Интеграции</button>
           <button class="button" id="refreshBtn" type="button">Обновить</button>
           <button class="button button-danger" id="cleanupBtn" type="button">Очистить просроченные файлы</button>
         </div>
@@ -64,6 +65,27 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <div class="modal-backdrop" id="integrationsModal" hidden>
+      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="integrationsTitle">
+        <header class="modal-head">
+          <div>
+            <h2 id="integrationsTitle">Интеграции</h2>
+            <div class="meta-line" id="integrationsEnvPath"></div>
+          </div>
+          <button class="button" id="integrationsCloseBtn" type="button">Закрыть</button>
+        </header>
+        <form id="integrationsForm" class="modal-body">
+          <div class="integration-status" id="integrationsStatus"></div>
+          <div class="settings-grid" id="integrationsFields"></div>
+          <footer class="modal-actions">
+            <button class="button" id="integrationsReloadBtn" type="button">Обновить статус</button>
+            <button class="button button-primary" type="submit">Сохранить</button>
+          </footer>
+        </form>
+      </section>
+    </div>
+
     <script src="/dashboard.js"></script>
   </body>
 </html>
