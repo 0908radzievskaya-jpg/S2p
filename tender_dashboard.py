@@ -116,6 +116,18 @@ METADATA_FILENAMES = {
     "source_message_path.txt",
 }
 DEFAULT_RELEVANT_EXCEL_GLOBS = ["reports/Заявки_*.xlsx", "reports/report-*.xlsx"]
+DEFAULT_DAILY_REPORT_EXCLUDE_PATTERNS = [
+    r"поможем\s+оформить\s+банковск\w*\s+гарант",
+    r"банковск\w*\s+гарант\w*\s+без\s+лишн\w*\s+сложност",
+    r"включени\w*\s+в\s+реестр\s+минпромторг",
+    r"как\s+забирать\s+прибыльн\w*\s+контракт\w*\s+на\s+этп",
+    r"фас\s+начнет\s+проверять\s+закупк\w*\s+с\s+помощью\s+ии",
+    r"другие\s+новости",
+    r"пс\s+и\s+оборудовани\w*,?\s+используем\w*\s+на\s+объект\w*\s+опо",
+    r"протокол\s+подведения\s+итогов\s+закупк",
+    r"\bвебинар\w*\b",
+    r"\bобучени\w*\b",
+]
 ANALYTIC_NOTE_HEADER = "Краткая аналитическая записка"
 DEADLINE_HEADER = "Окончание подачи предложений"
 DEADLINE_SOURCE_HEADERS = (
@@ -268,6 +280,138 @@ def save_state(config: dict[str, Any], config_path: Path, state: dict[str, Any])
     path = configured_state_path(config, config_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def dashboard_unprocessed_retention_days(config: dict[str, Any]) -> int:
+    dash = dashboard_config(config)
+    raw = dash.get("unprocessed_retention_days", config.get("unprocessed_download_retention_days", 10))
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 10
+
+
+def parse_state_datetime(value: Any) -> dt.datetime | None:
+    text = clean_text(value)
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    try:
+        parsed = dt.datetime.fromisoformat(normalized)
+    except ValueError:
+        try:
+            parsed = dt.datetime.combine(dt.date.fromisoformat(text[:10]), dt.time.min)
+        except ValueError:
+            return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+    return parsed
+
+
+def state_record_status(record: dict[str, Any]) -> str:
+    status = clean_text(record.get("status")) or "unchecked"
+    normalized = LEGACY_STATUS_MAP.get(status, status)
+    return normalized if normalized in STATUS_DEFS else "unchecked"
+
+
+def retain_unprocessed_state_record(record: dict[str, Any], retention_days: int) -> bool:
+    if retention_days <= 0 or state_record_status(record) != "unchecked":
+        return False
+    seen_at = parse_state_datetime(record.get("first_seen_at")) or parse_state_datetime(record.get("entry_date"))
+    if seen_at is None:
+        return False
+    return seen_at >= dt.datetime.now() - dt.timedelta(days=retention_days)
+
+
+def state_list(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple, set)):
+        return [clean_text(item) for item in value if clean_text(item)]
+    text = clean_text(value)
+    return [text] if text else []
+
+
+def state_columns(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {clean_text(key): clean_text(val) for key, val in value.items() if clean_text(key)}
+
+
+def snapshot_state_record(record: dict[str, Any], item: DashboardItem) -> bool:
+    snapshot = {
+        "source_kind": item.source_kind,
+        "entry_date": item.entry_date,
+        "title": item.title,
+        "columns": state_columns(item.columns),
+        "material_dir": item.material_dir,
+        "source_path": item.source_path,
+        "headers": state_list(item.headers),
+        "attachments": state_list(item.attachments),
+        "downloaded_files": state_list(item.downloaded_files),
+        "links": state_list(item.links),
+        "deep_analysis_dir": item.deep_analysis_dir,
+    }
+    changed = False
+    for key, value in snapshot.items():
+        if value in ("", [], {}):
+            continue
+        if record.get(key) != value:
+            record[key] = value
+            changed = True
+    return changed
+
+
+def item_from_state_record(item_id: str, record: dict[str, Any]) -> DashboardItem | None:
+    title = clean_text(record.get("title"))
+    columns = state_columns(record.get("columns"))
+    if not title:
+        title = first_column(columns, ("Объект", "Название объекта", "Тема"))
+    if not title:
+        return None
+    if not columns:
+        columns = {"Объект": title}
+    elif not first_column(columns, ("Объект", "Название объекта", "Тема")):
+        columns.setdefault("Объект", title)
+    return DashboardItem(
+        id=item_id,
+        source_kind=clean_text(record.get("source_kind")) or "retained_unprocessed",
+        entry_date=clean_text(record.get("entry_date")),
+        title=title,
+        columns=columns,
+        material_dir=clean_text(record.get("material_dir")),
+        source_path=clean_text(record.get("source_path")),
+        headers=state_list(record.get("headers")),
+        attachments=state_list(record.get("attachments")),
+        downloaded_files=state_list(record.get("downloaded_files")),
+        links=state_list(record.get("links")),
+        deep_analysis_dir=clean_text(record.get("deep_analysis_dir")),
+    )
+
+
+def append_retained_unprocessed_items(
+    items: list[DashboardItem],
+    state: dict[str, Any],
+    config: dict[str, Any],
+) -> list[DashboardItem]:
+    records = state.get("items")
+    if not isinstance(records, dict):
+        return items
+    retention_days = dashboard_unprocessed_retention_days(config)
+    present_ids = {item.id for item in items}
+    retained: list[DashboardItem] = []
+    for item_id, record in records.items():
+        if item_id in present_ids or not isinstance(record, dict):
+            continue
+        if not retain_unprocessed_state_record(record, retention_days):
+            continue
+        item = item_from_state_record(clean_text(item_id), record)
+        if item is not None and daily_report_row_excluded(item.columns, config):
+            continue
+        if item is not None:
+            item = apply_daily_report_title_normalization(item)
+            retained.append(item)
+    if not retained:
+        return items
+    return [*items, *retained]
 
 
 def integration_env_path(config: dict[str, Any], config_path: Path, explicit_path: str = "") -> Path:
@@ -745,6 +889,98 @@ def relevant_excel_globs(config: dict[str, Any]) -> list[str]:
         if pattern not in patterns:
             patterns.append(pattern)
     return patterns
+
+
+def daily_report_exclude_patterns(config: dict[str, Any]) -> list[str]:
+    patterns = list(DEFAULT_DAILY_REPORT_EXCLUDE_PATTERNS)
+    configured = dashboard_config(config).get("daily_report_exclude_patterns")
+    if isinstance(configured, list):
+        for value in configured:
+            pattern = clean_text(value)
+            if pattern and pattern not in patterns:
+                patterns.append(pattern)
+    return patterns
+
+
+def is_daily_report_path(path: Path | str) -> bool:
+    name = Path(clean_text(path)).name.lower()
+    return bool(re.fullmatch(r"report-\d{4}-\d{2}-\d{2}\.xlsx", name))
+
+
+def daily_report_search_text(columns: dict[str, str]) -> str:
+    priority_headers = (
+        "Название объекта",
+        "Объект",
+        "Тема",
+        "Вид работ",
+        "Заказчик",
+        "Заказчик/отправитель",
+        "Рекомендация следующего действия",
+        "Ссылки",
+    )
+    parts = [first_column(columns, (header,)) for header in priority_headers]
+    parts.extend(clean_text(value) for value in columns.values())
+    return " ".join(part for part in parts if part).lower()
+
+
+def daily_report_row_excluded(columns: dict[str, str], config: dict[str, Any]) -> bool:
+    text = daily_report_search_text(columns)
+    if not text:
+        return False
+    for pattern in daily_report_exclude_patterns(config):
+        try:
+            if re.search(pattern, text, flags=re.IGNORECASE):
+                return True
+        except re.error:
+            continue
+    return False
+
+
+def normalize_daily_report_object_title(value: str) -> str:
+    title = clean_text(value)
+    if not title:
+        return ""
+    title = re.sub(r"^[^\wа-яё]+", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"^новые\s+закупки\s*//\s*", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"^\(?\s*лот\s*\d+\s*\)?\s*", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"^уточнени\w*\s+по\s+тендеру\s*[:\-]\s*", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"^приглашени\w*\s+на\s+участие\s+в\s+тендере\s*", "", title, flags=re.IGNORECASE)
+    title = re.sub(
+        r"^приглашени\w*\s+на\s+закупку\s+[^:]{1,80}:\s*[a-zа-я0-9_.\-]+\s*",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+    title = re.sub(r"^[\s:;.,/\\\-–—]+", "", title)
+    return title or clean_text(value)
+
+
+def has_daily_report_title_wrapper(value: str) -> bool:
+    title = clean_text(value)
+    if not title:
+        return False
+    return bool(
+        re.search(r"новые\s+закупки\s*//", title, flags=re.IGNORECASE)
+        or re.search(r"уточнени\w*\s+по\s+тендеру\s*[:\-]", title, flags=re.IGNORECASE)
+        or re.search(r"приглашени\w*\s+на\s+участие\s+в\s+тендере", title, flags=re.IGNORECASE)
+        or re.search(r"приглашени\w*\s+на\s+закупку\s+[^:]{1,80}:", title, flags=re.IGNORECASE)
+        or re.match(r"^[^\wа-яё]*\(?\s*лот\s*\d+\s*\)?", title, flags=re.IGNORECASE)
+    )
+
+
+def apply_daily_report_title_normalization(item: DashboardItem) -> DashboardItem:
+    raw_title = first_column(item.columns, ("Название объекта", "Объект", "Тема")) or item.title
+    if not is_daily_report_path(item.source_path) and not has_daily_report_title_wrapper(raw_title):
+        return item
+    normalized = normalize_daily_report_object_title(raw_title)
+    if not normalized:
+        return item
+    item.title = normalized
+    if "Название объекта" in item.columns:
+        item.columns["Название объекта"] = normalized
+    if "Объект" in item.columns or "Название объекта" not in item.columns:
+        item.columns["Объект"] = normalized
+    return item
 
 
 def iter_excel_paths(config: dict[str, Any], config_path: Path) -> list[Path]:
@@ -1390,15 +1626,24 @@ def item_from_excel_row(
     headers: Sequence[str],
     row: Sequence[str],
     deep_items: Sequence[DashboardItem],
+    config: dict[str, Any],
 ) -> DashboardItem | None:
     columns = {
         header: clean_text(row[index]) if index < len(row) else ""
         for index, header in enumerate(headers)
         if header
     }
-    title = first_column(columns, ("Название объекта", "Объект", "Тема"))
-    if not title:
+    if is_daily_report_path(excel_path) and daily_report_row_excluded(columns, config):
         return None
+    raw_title = first_column(columns, ("Название объекта", "Объект", "Тема"))
+    if not raw_title:
+        return None
+    title = normalize_daily_report_object_title(raw_title) if is_daily_report_path(excel_path) else raw_title
+    if is_daily_report_path(excel_path):
+        if "Название объекта" in columns:
+            columns["Название объекта"] = title
+        if "Объект" in columns or "Название объекта" not in columns:
+            columns["Объект"] = title
     customer = first_column(columns, ("Заказчик", "Заказчик/отправитель"))
     entry_date = date_from_excel_row(columns, excel_path)
     deep_match = find_deep_match(title, deep_items)
@@ -1413,7 +1658,7 @@ def item_from_excel_row(
     material_dir = deep_match.material_dir if deep_match is not None else str(excel_path.parent.resolve())
     item_id = deep_match.id if deep_match is not None else stable_id(
         "excel",
-        f"{excel_path.resolve()}:{row_number}:{title}:{customer}",
+        f"{excel_path.resolve()}:{row_number}:{raw_title}:{customer}",
     )
 
     columns[DEADLINE_HEADER] = offer_deadline(columns)
@@ -1468,7 +1713,7 @@ def collect_excel_relevant_items(config: dict[str, Any], config_path: Path) -> l
         for row_number, row in enumerate(rows[1:], start=2):
             if not any(clean_text(value) for value in row):
                 continue
-            item = item_from_excel_row(excel_path, row_number, headers, row, deep_items)
+            item = item_from_excel_row(excel_path, row_number, headers, row, deep_items, config)
             if item is not None:
                 items.append(item)
     return items
@@ -1529,6 +1774,8 @@ def apply_state(items: list[DashboardItem], state: dict[str, Any], mutate: bool 
             if not record.get("first_seen_at"):
                 record["first_seen_at"] = current
                 changed = True
+        if mutate and snapshot_state_record(record, item):
+            changed = True
 
         status = clean_text(record.get("status")) or "unchecked"
         normalized_status = LEGACY_STATUS_MAP.get(status, status)
@@ -2144,6 +2391,7 @@ def serialise_item(item: DashboardItem, config: dict[str, Any], headers: Sequenc
 def dashboard_payload(config: dict[str, Any], config_path: Path) -> dict[str, Any]:
     state = load_state(config, config_path)
     items = collect_items(config, config_path)
+    items = append_retained_unprocessed_items(items, state, config)
     source_counts = source_analysis_counts(config, config_path)
     changed = apply_state(items, state, mutate=True)
     if changed:
@@ -2633,9 +2881,13 @@ def prune_empty_download_dirs(start: Path) -> None:
 def cleanup_downloaded_files(config: dict[str, Any], config_path: Path) -> dict[str, Any]:
     dash = dashboard_config(config)
     retention_days = int(dash.get("file_retention_days") or 3)
-    cutoff = dt.datetime.now() - dt.timedelta(days=retention_days)
+    unprocessed_retention_days = dashboard_unprocessed_retention_days(config)
+    now = dt.datetime.now()
+    cutoff = now - dt.timedelta(days=retention_days)
+    unprocessed_cutoff = now - dt.timedelta(days=unprocessed_retention_days)
     state = load_state(config, config_path)
     items = collect_items(config, config_path)
+    items = append_retained_unprocessed_items(items, state, config)
     apply_state(items, state, mutate=True)
     records = state.setdefault("items", {})
 
@@ -2643,15 +2895,17 @@ def cleanup_downloaded_files(config: dict[str, Any], config_path: Path) -> dict[
     skipped: list[str] = []
     for item in items:
         record = records.setdefault(item.id, {})
-        if clean_text(record.get("status")) in {"relevant", "submitting"}:
+        status = state_record_status(record)
+        if status in {"relevant", "submitting"}:
             skipped.append(item.id)
             continue
+        item_cutoff = unprocessed_cutoff if status == "unchecked" else cutoff
         deleted_for_item: list[str] = []
         for path_text in sorted(set(item.downloaded_files)):
             path = safe_download_file(path_text, config, config_path)
             if path is None:
                 continue
-            if not file_is_older_than(path, cutoff):
+            if not file_is_older_than(path, item_cutoff):
                 continue
             try:
                 path.unlink()
@@ -2670,7 +2924,9 @@ def cleanup_downloaded_files(config: dict[str, Any], config_path: Path) -> dict[
     save_state(config, config_path, state)
     return {
         "retentionDays": retention_days,
+        "unprocessedRetentionDays": unprocessed_retention_days,
         "cutoff": cutoff.isoformat(timespec="seconds"),
+        "unprocessedCutoff": unprocessed_cutoff.isoformat(timespec="seconds"),
         "deletedCount": len(deleted),
         "deletedFiles": deleted,
         "skipped": skipped,

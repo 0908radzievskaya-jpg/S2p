@@ -41,6 +41,7 @@
 - `dashboard.file_link_mode` — режим ссылок на файлы: `local` открывает локальный/сетевой путь, `download` отдает файлы и ZIP-папки через серверный `/api/download`;
 - `dashboard.min_nmc_rub` — минимальная НМЦК для показа в dashboard, по умолчанию `1500000`. Закупки с распознанной НМЦК ниже порога скрываются, закупки без цены остаются в списке;
 - `dashboard.relevant_excel_globs` — Excel-таблицы с AI-релевантными закупками, по умолчанию `reports/Заявки_*.xlsx` и ежедневные `reports/report-*.xlsx`;
+- `dashboard.daily_report_exclude_patterns` — дополнительные regex-фильтры для ежедневных отчетов. Встроенный стоп-лист уже убирает рекламу, новости, обучение, банковские гарантии и протоколы итогов;
 - `dashboard.local_path_prefix` и `dashboard.network_path_prefix` — замена локального пути на путь на диске `Z:` в ссылках dashboard;
 - `dashboard.auth_username`, `dashboard.auth_password` — опциональная Basic Auth для online-размещения. Также можно задать переменные окружения `TENDER_DASHBOARD_USER` и `TENDER_DASHBOARD_PASSWORD`;
 - `dashboard.bitrix_webhook_url` — входящий webhook Bitrix24. Если он не задан, статус `Релевантна` сохраняется, но лид и задача не создаются. На сервере webhook и ID пользователей можно хранить в `/etc/tender-dashboard/tender-dashboard.env` или вводить через кнопку `Интеграции`;

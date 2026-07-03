@@ -15,6 +15,7 @@
       "reports/Заявки_*.xlsx",
       "reports/report-*.xlsx"
     ],
+    "daily_report_exclude_patterns": [],
     "local_path_prefix": "C:\\Users\\User\\Documents\\Создание КП на входящих",
     "network_path_prefix": "Z:\\Тендеры",
     "include_archive_root": false,

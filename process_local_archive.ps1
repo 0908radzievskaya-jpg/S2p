@@ -4,7 +4,7 @@ param(
     [string]$MemoryPath = "C:\Users\User\.codex\automations\automation\memory.md",
     [string]$SortedRootPath = "C:\Users\User\Documents\Создание КП на входящих\sorted_mail",
     [string]$UnprocessedRootPath = "C:\Users\User\Documents\Создание КП на входящих\unprocessed",
-    [int]$UnprocessedRetentionDays = 7
+    [int]$UnprocessedRetentionDays = 10
 )
 
 Set-StrictMode -Version Latest
