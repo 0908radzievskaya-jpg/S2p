@@ -12,7 +12,8 @@
     "file_link_mode": "download",
     "min_nmc_rub": 1500000,
     "relevant_excel_globs": [
-      "reports/Заявки_*.xlsx"
+      "reports/Заявки_*.xlsx",
+      "reports/report-*.xlsx"
     ],
     "local_path_prefix": "C:\\Users\\User\\Documents\\Создание КП на входящих",
     "network_path_prefix": "Z:\\Тендеры",

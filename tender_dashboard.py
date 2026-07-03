@@ -75,6 +75,7 @@ DASHBOARD_DISPLAY_HEADERS = [
     "Объект",
     "Заказчик",
     "НМЦК",
+    "Окончание подачи предложений",
     "ТЗ",
     "Ссылки на закупку",
     "ТЭП",
@@ -114,9 +115,9 @@ METADATA_FILENAMES = {
     "run_summary.json",
     "source_message_path.txt",
 }
-DEFAULT_RELEVANT_EXCEL_GLOBS = ["reports/Заявки_*.xlsx"]
+DEFAULT_RELEVANT_EXCEL_GLOBS = ["reports/Заявки_*.xlsx", "reports/report-*.xlsx"]
 ANALYTIC_NOTE_HEADER = "Краткая аналитическая записка"
-DEADLINE_HEADER = "Крайняя дата подачи предложений"
+DEADLINE_HEADER = "Окончание подачи предложений"
 DEADLINE_SOURCE_HEADERS = (
     DEADLINE_HEADER,
     "Дата окончания приема предложений",
@@ -721,9 +722,15 @@ def read_xlsx_rows(path: Path) -> list[list[str]]:
 def relevant_excel_globs(config: dict[str, Any]) -> list[str]:
     dash = dashboard_config(config)
     configured = dash.get("relevant_excel_globs")
+    patterns: list[str] = []
     if isinstance(configured, list) and configured:
-        return [clean_text(value) for value in configured if clean_text(value)]
-    return list(DEFAULT_RELEVANT_EXCEL_GLOBS)
+        patterns = [clean_text(value) for value in configured if clean_text(value)]
+    if not patterns:
+        patterns = list(DEFAULT_RELEVANT_EXCEL_GLOBS)
+    for pattern in DEFAULT_RELEVANT_EXCEL_GLOBS:
+        if pattern not in patterns:
+            patterns.append(pattern)
+    return patterns
 
 
 def iter_excel_paths(config: dict[str, Any], config_path: Path) -> list[Path]:
@@ -748,6 +755,17 @@ def date_from_excel_path(path: Path) -> str:
         return dt.date.fromtimestamp(path.stat().st_mtime).isoformat()
     except OSError:
         return today_iso()
+
+
+def date_from_excel_row(columns: dict[str, str], excel_path: Path) -> str:
+    for header in ("Дата входа", "Дата обработки"):
+        value = clean_text(columns.get(header))
+        if not value:
+            continue
+        match = re.search(r"\d{4}-\d{2}-\d{2}", value)
+        if match:
+            return match.group(0)
+    return date_from_excel_path(excel_path)
 
 
 def summarize_file_names(paths: Sequence[str], limit: int = 8) -> str:
@@ -1290,7 +1308,7 @@ def item_from_excel_row(
     if not title:
         return None
     customer = first_column(columns, ("Заказчик", "Заказчик/отправитель"))
-    entry_date = date_from_excel_path(excel_path)
+    entry_date = date_from_excel_row(columns, excel_path)
     deep_match = find_deep_match(title, deep_items)
     if deep_match is not None and deep_match.entry_date:
         entry_date = deep_match.entry_date
@@ -1799,6 +1817,7 @@ def dashboard_display_columns(item: DashboardItem) -> dict[str, str]:
         "Объект": first_column(columns, ("Объект", "Название объекта", "Тема")) or item.title,
         "Заказчик": procurement_customer(item),
         "НМЦК": procurement_nmc(item),
+        "Окончание подачи предложений": offer_deadline(columns),
         "ТЗ": "Файлы удалены" if item.compact else "",
         "Ссылки на закупку": first_column(columns, ("Ссылки в интернете", "Ссылки")),
         "ТЭП": tep_summary(item),
