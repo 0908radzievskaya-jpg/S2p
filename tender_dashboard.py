@@ -240,6 +240,20 @@ def configured_state_path(config: dict[str, Any], config_path: Path) -> Path:
     return resolve_path(value, config_path.parent)
 
 
+def configured_state_dir(config: dict[str, Any], config_path: Path) -> Path:
+    return resolve_path(config.get("state_dir", ".state"), config_path.parent)
+
+
+def configured_source_counts_path(config: dict[str, Any], config_path: Path) -> Path:
+    dash = dashboard_config(config)
+    value = dash.get("source_counts_path") or ".state/dashboard_source_counts.json"
+    return resolve_path(value, config_path.parent)
+
+
+def configured_processed_messages_path(config: dict[str, Any], config_path: Path) -> Path:
+    return configured_state_dir(config, config_path) / "processed_messages.json"
+
+
 def load_state(config: dict[str, Any], config_path: Path) -> dict[str, Any]:
     path = configured_state_path(config, config_path)
     payload = read_json(path, {})
@@ -766,6 +780,84 @@ def date_from_excel_row(columns: dict[str, str], excel_path: Path) -> str:
         if match:
             return match.group(0)
     return date_from_excel_path(excel_path)
+
+
+def extract_iso_date(value: Any) -> str:
+    text = clean_text(value)
+    if not text:
+        return ""
+    match = re.search(r"\d{4}-\d{2}-\d{2}", text)
+    return match.group(0) if match else ""
+
+
+def normalize_source_counts(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {"total": 0, "byDate": {}}
+    raw_by_date = payload.get("byDate") or payload.get("by_date") or {}
+    by_date: dict[str, int] = {}
+    if isinstance(raw_by_date, dict):
+        for key, value in raw_by_date.items():
+            date = extract_iso_date(key)
+            if not date:
+                continue
+            try:
+                count = int(value)
+            except (TypeError, ValueError):
+                continue
+            if count > 0:
+                by_date[date] = by_date.get(date, 0) + count
+    try:
+        total = int(payload.get("total", 0))
+    except (TypeError, ValueError):
+        total = 0
+    if total <= 0:
+        total = sum(by_date.values())
+    return {
+        "total": total,
+        "byDate": dict(sorted(by_date.items(), reverse=True)),
+        "generatedAt": clean_text(payload.get("generatedAt") or payload.get("generated_at")),
+    }
+
+
+def source_counts_from_processed_messages(path: Path) -> dict[str, Any]:
+    payload = read_json(path, {})
+    processed = payload.get("processed") if isinstance(payload, dict) else payload
+    if isinstance(processed, dict):
+        records = list(processed.values())
+    elif isinstance(processed, list):
+        records = processed
+    else:
+        return {"total": 0, "byDate": {}}
+
+    by_date: dict[str, int] = {}
+    total = 0
+    for record in records:
+        total += 1
+        date = ""
+        if isinstance(record, dict):
+            for key in ("processed_at", "date", "entry_date", "created_at"):
+                date = extract_iso_date(record.get(key))
+                if date:
+                    break
+            if not date:
+                date = extract_iso_date(record.get("path"))
+        else:
+            date = extract_iso_date(record)
+        if date:
+            by_date[date] = by_date.get(date, 0) + 1
+    return {
+        "total": total,
+        "byDate": dict(sorted(by_date.items(), reverse=True)),
+        "generatedAt": now_iso(),
+    }
+
+
+def source_analysis_counts(config: dict[str, Any], config_path: Path) -> dict[str, Any]:
+    counts_path = configured_source_counts_path(config, config_path)
+    payload = normalize_source_counts(read_json(counts_path, {}))
+    if payload["total"] or payload["byDate"]:
+        return payload
+    return source_counts_from_processed_messages(configured_processed_messages_path(config, config_path))
 
 
 def summarize_file_names(paths: Sequence[str], limit: int = 8) -> str:
@@ -2052,6 +2144,7 @@ def serialise_item(item: DashboardItem, config: dict[str, Any], headers: Sequenc
 def dashboard_payload(config: dict[str, Any], config_path: Path) -> dict[str, Any]:
     state = load_state(config, config_path)
     items = collect_items(config, config_path)
+    source_counts = source_analysis_counts(config, config_path)
     changed = apply_state(items, state, mutate=True)
     if changed:
         save_state(config, config_path, state)
@@ -2076,6 +2169,7 @@ def dashboard_payload(config: dict[str, Any], config_path: Path) -> dict[str, An
         "statuses": STATUS_DEFS,
         "stats": stats,
         "dates": dates,
+        "sourceCounts": source_counts,
         "fileLinkMode": dashboard_file_link_mode(config),
         "items": serialised,
     }

@@ -9,12 +9,17 @@ param(
     [string]$Mode = "Minimal",
     [int]$KeepBackups = 7,
     [bool]$ApplyRemoteDeletions = $true,
-    [string[]]$LocalDeleteRoots = @("reports", "релевантные", "sorted_mail", "_review_ai_tender", "archive"),
+    [string[]]$LocalDeleteRoots = @(),
     [switch]$NoRestart
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+
+$RelevantRootName = -join ([char[]](0x0440, 0x0435, 0x043b, 0x0435, 0x0432, 0x0430, 0x043d, 0x0442, 0x043d, 0x044b, 0x0435))
+if ($LocalDeleteRoots.Count -eq 0) {
+    $LocalDeleteRoots = @("reports", $RelevantRootName, "sorted_mail", "_review_ai_tender", "archive")
+}
 
 if (-not $ProjectRoot) {
     $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
@@ -225,6 +230,22 @@ function Add-DeletionCandidate {
     }
 }
 
+function Get-ObjectPropertyValue {
+    param(
+        [object]$Object,
+        [string]$Name
+    )
+
+    if ($null -eq $Object) {
+        return $null
+    }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        return $null
+    }
+    return $property.Value
+}
+
 function Invoke-RemoteDeletionSync {
     if (-not $ApplyRemoteDeletions) {
         return
@@ -251,11 +272,13 @@ function Invoke-RemoteDeletionSync {
     $candidates = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($property in $state.items.PSObject.Properties) {
         $record = $property.Value
-        if (-not $record -or $record.status -ne "not_relevant" -or -not $record.files_deleted_at) {
+        $status = Get-ObjectPropertyValue -Object $record -Name "status"
+        $filesDeletedAt = Get-ObjectPropertyValue -Object $record -Name "files_deleted_at"
+        if (-not $record -or $status -ne "not_relevant" -or -not $filesDeletedAt) {
             continue
         }
-        Add-DeletionCandidate -Value $record.deleted_relative_paths -Candidates $candidates
-        Add-DeletionCandidate -Value $record.local_delete_candidates -Candidates $candidates
+        Add-DeletionCandidate -Value (Get-ObjectPropertyValue -Object $record -Name "deleted_relative_paths") -Candidates $candidates
+        Add-DeletionCandidate -Value (Get-ObjectPropertyValue -Object $record -Name "local_delete_candidates") -Candidates $candidates
     }
 
     $deleted = 0
@@ -272,12 +295,79 @@ function Invoke-RemoteDeletionSync {
     }
 }
 
+function New-SourceCountsFile {
+    $processedPath = Join-Path $ProjectRoot ".state\processed_messages.json"
+    if (-not (Test-Path -LiteralPath $processedPath)) {
+        return $false
+    }
+
+    try {
+        $state = Get-Content -LiteralPath $processedPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    }
+    catch {
+        Write-Warning "Could not read processed message state for source counts: $($_.Exception.Message)"
+        return $false
+    }
+
+    $processed = Get-ObjectPropertyValue -Object $state -Name "processed"
+    if ($null -eq $processed) {
+        return $false
+    }
+
+    if ($processed -is [System.Array]) {
+        $records = $processed
+    }
+    elseif ($processed -is [System.Collections.IDictionary]) {
+        $records = $processed.Values
+    }
+    else {
+        $records = $processed.PSObject.Properties | ForEach-Object { $_.Value }
+    }
+
+    $byDate = @{}
+    $total = 0
+    foreach ($record in $records) {
+        $total++
+        $date = $null
+        foreach ($name in @("processed_at", "date", "entry_date", "created_at", "path")) {
+            $value = Get-ObjectPropertyValue -Object $record -Name $name
+            if ($null -ne $value -and (($value | Out-String).Trim() -match "\d{4}-\d{2}-\d{2}")) {
+                $date = $Matches[0]
+                break
+            }
+        }
+        if ($date) {
+            if (-not $byDate.ContainsKey($date)) {
+                $byDate[$date] = 0
+            }
+            $byDate[$date]++
+        }
+    }
+
+    $orderedByDate = [ordered]@{}
+    foreach ($date in ($byDate.Keys | Sort-Object -Descending)) {
+        $orderedByDate[$date] = $byDate[$date]
+    }
+
+    $target = Join-Path $stagingRoot ".state\dashboard_source_counts.json"
+    New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+    $payload = [ordered]@{
+        generatedAt = (Get-Date).ToString("s")
+        total = $total
+        byDate = $orderedByDate
+        source = ".state/processed_messages.json"
+    }
+    $json = $payload | ConvertTo-Json -Depth 5
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($target, $json, $utf8NoBom)
+    return $true
+}
+
 function New-MinimalPackage {
     New-Item -ItemType Directory -Path (Join-Path $stagingRoot "reports") -Force | Out-Null
-    New-Item -ItemType Directory -Path (Join-Path $stagingRoot "релевантные") -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $stagingRoot $RelevantRootName) -Force | Out-Null
 
     $seen = @{}
-    $selectedNamePattern = "(?i)(^заявки_|^report-|тз|техническ|задани|описан|объект.*закуп|смет|калькуляц|расче[тт]|аналит|записк)"
     $selectedExtensions = @(".pdf", ".doc", ".docx", ".xls", ".xlsx", ".txt")
     $analysisMetaNames = @(
         "03_document_index.json",
@@ -294,7 +384,7 @@ function New-MinimalPackage {
         "source_message_path.txt"
     )
 
-    foreach ($rootName in @("reports", "релевантные")) {
+    foreach ($rootName in @("reports", $RelevantRootName)) {
         $rootPath = Join-Path $ProjectRoot $rootName
         if (-not (Test-Path -LiteralPath $rootPath)) {
             continue
@@ -303,21 +393,34 @@ function New-MinimalPackage {
         Get-ChildItem -LiteralPath $rootPath -Recurse -File | ForEach-Object {
             $relative = Get-RelativePath -Path $_.FullName
             $extension = $_.Extension.ToLowerInvariant()
-            $isDashboardWorkbook = $relative -match "^[\\/]?reports[\\/](Заявки_|report-).+\.xlsx$"
+            $relativeParts = $relative -split "[\\/]"
+            $isDirectReportWorkbook = (
+                $relativeParts.Count -eq 2 -and
+                $relativeParts[0].Equals("reports", [System.StringComparison]::OrdinalIgnoreCase) -and
+                $extension -eq ".xlsx"
+            )
             $isAnalysisMeta = ($relative -match "^[\\/]?reports[\\/]analysis_") -and ($analysisMetaNames -contains $_.Name)
-            $isSelectedDocument = ($selectedExtensions -contains $extension) -and ($_.Name -match $selectedNamePattern)
+            $isSelectedDocument = (
+                ($selectedExtensions -contains $extension) -and
+                (
+                    ($relativeParts.Count -gt 0 -and $relativeParts[0].Equals($RelevantRootName, [System.StringComparison]::OrdinalIgnoreCase)) -or
+                    ($relative -match "^[\\/]?reports[\\/]analysis_")
+                )
+            )
 
-            if ($isDashboardWorkbook -or $isAnalysisMeta -or $isSelectedDocument) {
+            if ($isDirectReportWorkbook -or $isAnalysisMeta -or $isSelectedDocument) {
                 Add-StagedFile -File $_ -Seen $seen
             }
         }
     }
 
+    [void](New-SourceCountsFile)
+
     if ($seen.Count -eq 0) {
-        throw "No minimal dashboard files found. Expected reports/Заявки_*.xlsx, analysis JSON, TZ, estimate, or analytic files."
+        throw "No minimal dashboard files found. Expected report workbooks, analysis JSON, TZ, estimate, or analytic files."
     }
 
-    return @("reports", "релевантные")
+    return @("reports", $RelevantRootName, ".state")
 }
 
 $remoteScript = @'
@@ -328,6 +431,7 @@ ARCHIVE="$1"
 APP_DIR="$2"
 KEEP_BACKUPS="$3"
 RESTART="$4"
+RELEVANT_ROOT="$5"
 STAGING="/tmp/tender-dashboard-data-$$"
 BACKUP_ROOT="/var/backups/tender-dashboard-data"
 
@@ -344,7 +448,7 @@ backup="$BACKUP_ROOT/$stamp"
 mkdir -p "$backup"
 
 changed=0
-for name in reports релевантные; do
+for name in reports "$RELEVANT_ROOT"; do
     if [ -e "$STAGING/$name" ]; then
         if [ -e "$APP_DIR/$name" ]; then
             mv "$APP_DIR/$name" "$backup/$name"
@@ -354,13 +458,19 @@ for name in reports релевантные; do
     fi
 done
 
+if [ -f "$STAGING/.state/dashboard_source_counts.json" ]; then
+    mkdir -p "$APP_DIR/.state"
+    install -m 0640 -o tender-dashboard -g tender-dashboard "$STAGING/.state/dashboard_source_counts.json" "$APP_DIR/.state/dashboard_source_counts.json"
+    changed=1
+fi
+
 if [ "$changed" = "0" ]; then
     echo "No recognized data folders found in uploaded archive." >&2
     exit 1
 fi
 
-chown -R tender-dashboard:tender-dashboard "$APP_DIR/reports" "$APP_DIR/релевантные" 2>/dev/null || true
-chmod -R u+rwX,go+rX,go-w "$APP_DIR/reports" "$APP_DIR/релевантные" 2>/dev/null || true
+chown -R tender-dashboard:tender-dashboard "$APP_DIR/reports" "$APP_DIR/$RELEVANT_ROOT" 2>/dev/null || true
+chmod -R u+rwX,go+rX,go-w "$APP_DIR/reports" "$APP_DIR/$RELEVANT_ROOT" 2>/dev/null || true
 find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d | sort -r | tail -n +"$((KEEP_BACKUPS + 1))" | xargs -r rm -rf
 
 if [ "$RESTART" = "1" ]; then
@@ -398,11 +508,11 @@ try {
 
     if ($Mode -eq "Full") {
         $packageRoot = $ProjectRoot
-        $tarRoots = @("reports", "релевантные") | Where-Object {
+        $tarRoots = @("reports", $RelevantRootName) | Where-Object {
             Test-Path -LiteralPath (Join-Path $ProjectRoot $_)
         }
         if ($tarRoots.Count -eq 0) {
-            throw "No dashboard data folders found. Expected 'reports' or 'релевантные' under $ProjectRoot."
+            throw "No dashboard data folders found. Expected 'reports' or relevant materials folder under $ProjectRoot."
         }
     }
     else {
@@ -432,7 +542,7 @@ try {
     }
 
     Write-Host "Applying data on server"
-    & ssh @sshArgs $remote "bash '$remoteApplyPath' '$remoteArchivePath' '$RemoteAppDir' '$KeepBackups' '$restartFlag'"
+    & ssh @sshArgs $remote "bash '$remoteApplyPath' '$remoteArchivePath' '$RemoteAppDir' '$KeepBackups' '$restartFlag' '$RelevantRootName'"
     if ($LASTEXITCODE -ne 0) {
         throw "remote apply failed with exit code $LASTEXITCODE"
     }

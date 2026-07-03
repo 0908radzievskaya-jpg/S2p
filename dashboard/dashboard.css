@@ -100,7 +100,7 @@ h1 {
 
 .metrics {
   display: grid;
-  grid-template-columns: repeat(4, minmax(140px, 1fr));
+  grid-template-columns: repeat(5, minmax(140px, 1fr));
   gap: 12px;
   margin-bottom: 14px;
 }
@@ -141,6 +141,10 @@ h1 {
 
 .metric-work {
   border-left: 4px solid var(--green);
+}
+
+.metric-analyzed {
+  border-left: 4px solid var(--amber);
 }
 
 .filters {

@@ -16,6 +16,8 @@ const els = {
   statUnchecked: document.getElementById("statUnchecked"),
   statNotRelevant: document.getElementById("statNotRelevant"),
   statInWork: document.getElementById("statInWork"),
+  statAnalyzedSources: document.getElementById("statAnalyzedSources"),
+  statAnalyzedSourcesLabel: document.getElementById("statAnalyzedSourcesLabel"),
   searchInput: document.getElementById("searchInput"),
   dateFilter: document.getElementById("dateFilter"),
   statusFilter: document.getElementById("statusFilter"),
@@ -50,6 +52,10 @@ function formatDateTime(value) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function formatNumber(value) {
+  return Number(value || 0).toLocaleString("ru-RU");
 }
 
 function showToast(message) {
@@ -145,10 +151,15 @@ function syncDateFilter() {
 
 function updateStats() {
   const stats = state.payload.stats || {};
+  const sourceCounts = state.payload.sourceCounts || {};
+  const byDate = sourceCounts.byDate || {};
+  const analyzedSources = state.date === "all" ? sourceCounts.total || 0 : byDate[state.date] || 0;
   els.statNew.textContent = stats.new || 0;
   els.statUnchecked.textContent = stats.unchecked || 0;
   els.statNotRelevant.textContent = stats.notRelevant || 0;
   els.statInWork.textContent = stats.inWork || 0;
+  els.statAnalyzedSources.textContent = formatNumber(analyzedSources);
+  els.statAnalyzedSourcesLabel.textContent = state.date === "all" ? "проанализировано входящих" : "входящих за дату";
   els.generatedAt.textContent = `Обновлено: ${formatDateTime(state.payload.generatedAt)}. Всего: ${stats.total || 0}`;
 }
 
@@ -199,8 +210,11 @@ function renderDateSection(date, items, isMain) {
   const section = make("section", "date-section");
   const head = make("div", "section-head");
   const titleWrap = make("div", "section-title");
+  const analyzedSources = state.payload.sourceCounts?.byDate?.[date] || 0;
+  const sectionStats = [`${items.length} строк`];
+  if (analyzedSources) sectionStats.push(`${formatNumber(analyzedSources)} входящих проанализировано`);
   titleWrap.append(make("h2", "", isMain ? `Основная таблица: ${date}` : date));
-  titleWrap.append(make("span", "section-count", `${items.length} строк`));
+  titleWrap.append(make("span", "section-count", sectionStats.join(" · ")));
   head.append(titleWrap);
   section.append(head);
 
