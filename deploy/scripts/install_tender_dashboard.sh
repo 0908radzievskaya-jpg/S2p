@@ -90,6 +90,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
     build-essential \
     caddy \
     curl \
+    fonts-dejavu-core \
     git \
     python3 \
     python3-pip \

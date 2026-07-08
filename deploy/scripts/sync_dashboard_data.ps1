@@ -400,6 +400,7 @@ function New-MinimalPackage {
                 $extension -eq ".xlsx"
             )
             $isAnalysisMeta = ($relative -match "^[\\/]?reports[\\/]analysis_") -and ($analysisMetaNames -contains $_.Name)
+            $isAnalyticNote = ($relative -match "^[\\/]?reports[\\/]analytic_notes[\\/].+\.pdf$")
             $isSelectedDocument = (
                 ($selectedExtensions -contains $extension) -and
                 (
@@ -408,7 +409,7 @@ function New-MinimalPackage {
                 )
             )
 
-            if ($isDirectReportWorkbook -or $isAnalysisMeta -or $isSelectedDocument) {
+            if ($isDirectReportWorkbook -or $isAnalysisMeta -or $isAnalyticNote -or $isSelectedDocument) {
                 Add-StagedFile -File $_ -Seen $seen
             }
         }

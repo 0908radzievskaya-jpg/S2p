@@ -117,7 +117,8 @@ METADATA_FILENAMES = {
     "source_message_path.txt",
 }
 DEFAULT_RELEVANT_EXCEL_GLOBS = ["reports/Заявки_*.xlsx", "reports/report-*.xlsx"]
-ANALYTIC_NOTE_FILENAME = "Аналитическая записка.md"
+ANALYTIC_NOTE_FILENAME = "Аналитическая записка.pdf"
+ANALYTIC_NOTE_PDF_TEMPLATE_VERSION = "pdf-v2"
 DEFAULT_DAILY_REPORT_EXCLUDE_PATTERNS = [
     r"поможем\s+оформить\s+банковск\w*\s+гарант",
     r"банковск\w*\s+гарант\w*\s+без\s+лишн\w*\s+сложност",
@@ -2156,7 +2157,7 @@ def technical_assignment_paths(item: DashboardItem) -> list[str]:
 
 def analytic_note_slug(item: DashboardItem) -> str:
     base = normalize_match_key(item.title or first_column(item.columns, ("Объект", "Название объекта", "Тема")))[:60]
-    return f"{item.id}_{base or 'zakupka'}.md"
+    return f"{item.id}_{base or 'zakupka'}.pdf"
 
 
 def analytic_note_target_path(item: DashboardItem, config: dict[str, Any], config_path: Path) -> Path:
@@ -2181,6 +2182,158 @@ def markdown_link_lines(values: Sequence[str]) -> list[str]:
     return lines
 
 
+def analytic_note_pdf_font_paths() -> tuple[Path | None, Path | None]:
+    env_font = clean_text(os.environ.get("TENDER_DASHBOARD_PDF_FONT"))
+    env_bold = clean_text(os.environ.get("TENDER_DASHBOARD_PDF_BOLD_FONT"))
+    candidates = [
+        (Path(env_font), Path(env_bold) if env_bold else None) if env_font else (None, None),
+        (Path(r"C:\Windows\Fonts\arial.ttf"), Path(r"C:\Windows\Fonts\arialbd.ttf")),
+        (Path(r"C:\Windows\Fonts\calibri.ttf"), Path(r"C:\Windows\Fonts\calibrib.ttf")),
+        (Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"), Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")),
+        (Path("/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"), Path("/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf")),
+        (Path("/usr/share/fonts/truetype/freefont/FreeSans.ttf"), Path("/usr/share/fonts/truetype/freefont/FreeSansBold.ttf")),
+    ]
+    for regular, bold in candidates:
+        if regular and regular.exists():
+            return regular, bold if bold and bold.exists() else regular
+    return None, None
+
+
+def analytic_note_pdf_font_names() -> tuple[str, str]:
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    regular_path, bold_path = analytic_note_pdf_font_paths()
+    if not regular_path:
+        return "Helvetica", "Helvetica-Bold"
+
+    regular_name = "TenderDashboardSans"
+    bold_name = "TenderDashboardSans-Bold"
+    registered = set(pdfmetrics.getRegisteredFontNames())
+    if regular_name not in registered:
+        pdfmetrics.registerFont(TTFont(regular_name, str(regular_path)))
+    if bold_name not in registered:
+        pdfmetrics.registerFont(TTFont(bold_name, str(bold_path or regular_path)))
+    pdfmetrics.registerFontFamily(
+        regular_name,
+        normal=regular_name,
+        bold=bold_name,
+        italic=regular_name,
+        boldItalic=bold_name,
+    )
+    return regular_name, bold_name
+
+
+def pdf_markup(text: str) -> str:
+    value = clean_text(text)
+    if value.startswith("<") and value.endswith(">"):
+        value = value[1:-1]
+    if value.startswith("`") and value.endswith("`"):
+        value = value[1:-1]
+    return html.escape(value).replace("\n", "<br/>")
+
+
+def write_analytic_note_pdf(target: Path, content: str) -> None:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+
+    regular_font, bold_font = analytic_note_pdf_font_names()
+    styles = {
+        "title": ParagraphStyle(
+            "TenderNoteTitle",
+            fontName=bold_font,
+            fontSize=18,
+            leading=22,
+            spaceAfter=10,
+            textColor=colors.HexColor("#1f2937"),
+            wordWrap="CJK",
+        ),
+        "heading": ParagraphStyle(
+            "TenderNoteHeading",
+            fontName=bold_font,
+            fontSize=12,
+            leading=15,
+            spaceBefore=8,
+            spaceAfter=5,
+            textColor=colors.HexColor("#111827"),
+            wordWrap="CJK",
+        ),
+        "body": ParagraphStyle(
+            "TenderNoteBody",
+            fontName=regular_font,
+            fontSize=9.5,
+            leading=13,
+            spaceAfter=4,
+            textColor=colors.HexColor("#111827"),
+            wordWrap="CJK",
+        ),
+        "bullet": ParagraphStyle(
+            "TenderNoteBullet",
+            fontName=regular_font,
+            fontSize=9,
+            leading=12,
+            bulletFontName=regular_font,
+            leftIndent=10,
+            firstLineIndent=0,
+            bulletIndent=0,
+            spaceAfter=3,
+            textColor=colors.HexColor("#111827"),
+            wordWrap="CJK",
+        ),
+        "meta": ParagraphStyle(
+            "TenderNoteMeta",
+            fontName=regular_font,
+            fontSize=8,
+            leading=10,
+            textColor=colors.HexColor("#6b7280"),
+            wordWrap="CJK",
+        ),
+    }
+
+    story: list[Any] = []
+    previous_blank = False
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line:
+            if not previous_blank:
+                story.append(Spacer(1, 3 * mm))
+            previous_blank = True
+            continue
+        previous_blank = False
+        if line.startswith("# "):
+            story.append(Paragraph(pdf_markup(line[2:]), styles["title"]))
+        elif line.startswith("## "):
+            story.append(Paragraph(pdf_markup(line[3:]), styles["heading"]))
+        elif line.startswith("- "):
+            story.append(Paragraph(pdf_markup(line[2:]), styles["bullet"], bulletText="-"))
+        elif line.startswith("Дата формирования:") or line.startswith("Дата входа:") or line.startswith("Источник закупки:"):
+            story.append(Paragraph(pdf_markup(line), styles["meta"]))
+        else:
+            story.append(Paragraph(pdf_markup(line), styles["body"]))
+
+    def draw_footer(canvas: Any, doc: Any) -> None:
+        canvas.saveState()
+        canvas.setFont(regular_font, 8)
+        canvas.setFillColor(colors.HexColor("#6b7280"))
+        canvas.drawRightString(A4[0] - doc.rightMargin, 11 * mm, f"стр. {doc.page}")
+        canvas.restoreState()
+
+    doc = SimpleDocTemplate(
+        str(target),
+        pagesize=A4,
+        leftMargin=18 * mm,
+        rightMargin=18 * mm,
+        topMargin=16 * mm,
+        bottomMargin=18 * mm,
+        title="Аналитическая записка",
+        author="Tender Dashboard",
+    )
+    doc.build(story, onFirstPage=draw_footer, onLaterPages=draw_footer)
+
+
 def analytic_note_markdown(item: DashboardItem) -> str:
     columns = item.columns
     title = first_column(columns, ("Объект", "Название объекта", "Тема")) or item.title
@@ -2193,7 +2346,7 @@ def analytic_note_markdown(item: DashboardItem) -> str:
     parts = [
         "# Аналитическая записка",
         "",
-        f"Дата формирования: {now_iso()}",
+        f"Дата формирования: {today_iso()}",
         f"Дата входа: {item.entry_date or 'не указана'}",
         f"Источник закупки: {procurement_source(item)}",
         "",
@@ -2232,10 +2385,14 @@ def ensure_analytic_note_file(item: DashboardItem, config: dict[str, Any], confi
         target = analytic_note_target_path(item, config, config_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         content = analytic_note_markdown(item)
-        if not target.exists() or target.read_text(encoding="utf-8", errors="ignore") != content:
-            target.write_text(content, encoding="utf-8")
+        signature = hashlib.sha256(f"{ANALYTIC_NOTE_PDF_TEMPLATE_VERSION}\n{content}".encode("utf-8")).hexdigest()
+        signature_path = target.with_suffix(target.suffix + ".sha256")
+        old_signature = signature_path.read_text(encoding="utf-8", errors="ignore").strip() if signature_path.exists() else ""
+        if not target.exists() or old_signature != signature:
+            write_analytic_note_pdf(target, content)
+            signature_path.write_text(signature, encoding="utf-8")
         return str(target.resolve())
-    except OSError:
+    except (ImportError, OSError, ValueError):
         return ""
 
 
