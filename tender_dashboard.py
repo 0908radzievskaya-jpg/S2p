@@ -2884,6 +2884,7 @@ def update_item_status(
         item = next((candidate for candidate in items if candidate.id == item_id), None)
         if item is None:
             raise KeyError(item_id)
+        snapshot_state_record(record, item)
     else:
         item = None
 
