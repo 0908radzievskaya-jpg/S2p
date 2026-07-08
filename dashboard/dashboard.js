@@ -314,6 +314,10 @@ function renderValueCell(item, header) {
     if (item.compact) return textCell("Файлы удалены");
     return linkCell(item.technicalAssignmentFiles || []);
   }
+  if (header === "Аналитическая записка") {
+    if (item.compact) return textCell("Файлы удалены");
+    return linkCell(item.analyticNoteFile?.path ? [item.analyticNoteFile] : []);
+  }
   if (header === "Папка материалов") {
     return linkCell(item.folder ? [item.folder] : []);
   }

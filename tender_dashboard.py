@@ -77,6 +77,7 @@ DASHBOARD_DISPLAY_HEADERS = [
     "НМЦК",
     "Окончание подачи предложений",
     "ТЗ",
+    "Аналитическая записка",
     "Ссылки на закупку",
     "ТЭП",
     "Рекомендация следующего действия",
@@ -116,6 +117,7 @@ METADATA_FILENAMES = {
     "source_message_path.txt",
 }
 DEFAULT_RELEVANT_EXCEL_GLOBS = ["reports/Заявки_*.xlsx", "reports/report-*.xlsx"]
+ANALYTIC_NOTE_FILENAME = "Аналитическая записка.md"
 DEFAULT_DAILY_REPORT_EXCLUDE_PATTERNS = [
     r"поможем\s+оформить\s+банковск\w*\s+гарант",
     r"банковск\w*\s+гарант\w*\s+без\s+лишн\w*\s+сложност",
@@ -2103,8 +2105,11 @@ def item_specific_material_dirs(item: DashboardItem) -> list[Path]:
         path = Path(text)
         if path.name.lower() in {"reports", "релевантные", "archive", "sorted_mail"}:
             continue
-        if path.exists() and path.is_dir():
-            dirs.append(path.resolve())
+        try:
+            if path.exists() and path.is_dir():
+                dirs.append(path.resolve())
+        except OSError:
+            continue
     result: list[Path] = []
     seen: set[str] = set()
     for path in dirs:
@@ -2149,6 +2154,91 @@ def technical_assignment_paths(item: DashboardItem) -> list[str]:
     return [str(path) for path in selected[:3]]
 
 
+def analytic_note_slug(item: DashboardItem) -> str:
+    base = normalize_match_key(item.title or first_column(item.columns, ("Объект", "Название объекта", "Тема")))[:60]
+    return f"{item.id}_{base or 'zakupka'}.md"
+
+
+def analytic_note_target_path(item: DashboardItem, config: dict[str, Any], config_path: Path) -> Path:
+    for base in item_specific_material_dirs(item):
+        if base.exists() and base.is_dir():
+            return base / ANALYTIC_NOTE_FILENAME
+    reports_root = configured_roots(config, config_path)["reports"]
+    date_part = item.entry_date if looks_like_date(item.entry_date) else today_iso()
+    return reports_root / "analytic_notes" / date_part / analytic_note_slug(item)
+
+
+def markdown_link_lines(values: Sequence[str]) -> list[str]:
+    lines: list[str] = []
+    for value in values:
+        text = clean_text(value)
+        if not text:
+            continue
+        if re.match(r"^https?://", text, flags=re.IGNORECASE):
+            lines.append(f"- <{text}>")
+        else:
+            lines.append(f"- `{text}`")
+    return lines
+
+
+def analytic_note_markdown(item: DashboardItem) -> str:
+    columns = item.columns
+    title = first_column(columns, ("Объект", "Название объекта", "Тема")) or item.title
+    customer = procurement_customer(item) or first_column(columns, ("Заказчик", "Заказчик/отправитель"))
+    links = list(dict.fromkeys([*item.links, *extract_urls_from_text(first_column(columns, ("Ссылки в интернете", "Ссылки")))]))
+    source_files = split_semicolon_paths(columns.get("Исходные файлы", "")) or [*item.attachments, *item.downloaded_files]
+    technical_files = technical_assignment_paths(item)
+    note = first_column(columns, (ANALYTIC_NOTE_HEADER,)) or build_analytic_note(columns)
+    recommendation = first_column(columns, ("Рекомендация следующего действия", "Рекомендация"))
+    parts = [
+        "# Аналитическая записка",
+        "",
+        f"Дата формирования: {now_iso()}",
+        f"Дата входа: {item.entry_date or 'не указана'}",
+        f"Источник закупки: {procurement_source(item)}",
+        "",
+        "## Закупка",
+        "",
+        f"Объект: {title or 'не указан'}",
+        f"Заказчик: {customer or 'не указан'}",
+        f"НМЦК: {procurement_nmc(item) or 'не указана'}",
+        f"Окончание подачи предложений: {offer_deadline(columns) or 'не указано'}",
+        f"ТЭП: {tep_summary(item) or 'не извлечены'}",
+        "",
+        "## Ссылки на закупку",
+        "",
+        *(markdown_link_lines(links) or ["- не найдены"]),
+        "",
+        "## ТЗ и материалы",
+        "",
+        *(markdown_link_lines(technical_files) or markdown_link_lines(source_files) or ["- не найдены"]),
+        "",
+        "## Анализ",
+        "",
+        note or "Аналитическая часть не сформирована.",
+        "",
+        "## Рекомендация",
+        "",
+        recommendation or "Выполнить ручную проверку ТЗ, сроков и состава документации перед решением о подаче.",
+        "",
+    ]
+    return "\n".join(parts)
+
+
+def ensure_analytic_note_file(item: DashboardItem, config: dict[str, Any], config_path: Path) -> str:
+    if item.compact:
+        return ""
+    try:
+        target = analytic_note_target_path(item, config, config_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        content = analytic_note_markdown(item)
+        if not target.exists() or target.read_text(encoding="utf-8", errors="ignore") != content:
+            target.write_text(content, encoding="utf-8")
+        return str(target.resolve())
+    except OSError:
+        return ""
+
+
 def dashboard_display_columns(item: DashboardItem) -> dict[str, str]:
     columns = item.columns
     return {
@@ -2158,6 +2248,7 @@ def dashboard_display_columns(item: DashboardItem) -> dict[str, str]:
         "НМЦК": procurement_nmc(item),
         "Окончание подачи предложений": offer_deadline(columns),
         "ТЗ": "Файлы удалены" if item.compact else "",
+        "Аналитическая записка": "Файлы удалены" if item.compact else "",
         "Ссылки на закупку": first_column(columns, ("Ссылки в интернете", "Ссылки")),
         "ТЭП": tep_summary(item),
         "Рекомендация следующего действия": first_column(columns, ("Рекомендация следующего действия", "Рекомендация")),
@@ -2354,13 +2445,15 @@ def headers_for_items(items: Sequence[DashboardItem]) -> list[str]:
     return list(DASHBOARD_DISPLAY_HEADERS)
 
 
-def serialise_item(item: DashboardItem, config: dict[str, Any], headers: Sequence[str]) -> dict[str, Any]:
+def serialise_item(item: DashboardItem, config: dict[str, Any], config_path: Path, headers: Sequence[str]) -> dict[str, Any]:
     columns = dashboard_display_columns(item)
 
     files = [linked_path(path, config) for path in sorted(set([*item.attachments, *item.downloaded_files])) if path]
     downloaded = [linked_path(path, config) for path in sorted(set(item.downloaded_files)) if path]
     folder = linked_material_folder(item, config)
     technical_assignment_files = [linked_path(path, config) for path in technical_assignment_paths(item)]
+    analytic_note_path = ensure_analytic_note_file(item, config, config_path)
+    analytic_note_file = linked_path(analytic_note_path, config) if analytic_note_path else {}
     return {
         "id": item.id,
         "sourceKind": item.source_kind,
@@ -2382,6 +2475,7 @@ def serialise_item(item: DashboardItem, config: dict[str, Any], headers: Sequenc
         "files": files,
         "downloadedFiles": downloaded,
         "technicalAssignmentFiles": technical_assignment_files,
+        "analyticNoteFile": analytic_note_file,
         "links": item.links,
         "sourcePath": item.source_path,
         "deepAnalysisDir": item.deep_analysis_dir,
@@ -2400,7 +2494,7 @@ def dashboard_payload(config: dict[str, Any], config_path: Path) -> dict[str, An
     items = [item for item in all_items if dashboard_item_visible_by_nmc(item, config)]
     items.sort(key=item_sort_key)
     headers = headers_for_items(items)
-    serialised = [serialise_item(item, config, headers) for item in items]
+    serialised = [serialise_item(item, config, config_path, headers) for item in items]
     stats = {
         "total": len(items),
         "excludedByNmc": len(all_items) - len(items),
@@ -2485,7 +2579,10 @@ def resolve_cleanup_candidate(path_text: str, config_path: Path) -> Path | None:
 
 
 def safe_cleanup_file(path: Path, roots: Sequence[Path]) -> bool:
-    if not path.exists() or not path.is_file():
+    try:
+        if not path.exists() or not path.is_file():
+            return False
+    except OSError:
         return False
     if path.name in METADATA_FILENAMES or path.suffix.lower() == ".json":
         return False
@@ -2501,23 +2598,51 @@ def safe_cleanup_file(path: Path, roots: Sequence[Path]) -> bool:
     return True
 
 
-def iter_cleanup_files(path: Path, roots: Sequence[Path]) -> list[Path]:
-    if path.is_file():
+def iter_cleanup_files(path: Path, roots: Sequence[Path], errors: list[str] | None = None) -> list[Path]:
+    try:
+        is_file = path.is_file()
+        exists = path.exists()
+        is_dir = path.is_dir()
+    except OSError as exc:
+        if errors is not None:
+            errors.append(f"{path}: {exc}")
+        return []
+    if is_file:
         return [path] if safe_cleanup_file(path, roots) else []
-    if not path.exists() or not path.is_dir():
+    if not exists or not is_dir:
         return []
     if not any(path_within(path, root) for root in roots):
         return []
-    if any(path.resolve() == root.resolve() for root in roots):
+    try:
+        if any(path.resolve() == root.resolve() for root in roots):
+            return []
+    except OSError as exc:
+        if errors is not None:
+            errors.append(f"{path}: {exc}")
         return []
-    return [candidate for candidate in path.rglob("*") if safe_cleanup_file(candidate, roots)]
+    result: list[Path] = []
+    try:
+        for candidate in path.rglob("*"):
+            try:
+                if safe_cleanup_file(candidate, roots):
+                    result.append(candidate)
+            except OSError as exc:
+                if errors is not None:
+                    errors.append(f"{candidate}: {exc}")
+    except OSError as exc:
+        if errors is not None:
+            errors.append(f"{path}: {exc}")
+    return result
 
 
 def prune_empty_dirs_to_roots(start: Path, roots: Sequence[Path]) -> list[str]:
     removed: list[str] = []
     current = start
     while True:
-        if any(current.resolve() == root.resolve() for root in roots):
+        try:
+            if any(current.resolve() == root.resolve() for root in roots):
+                break
+        except OSError:
             break
         if not any(path_within(current, root) for root in roots):
             break
@@ -2535,6 +2660,7 @@ def delete_not_relevant_files(item: DashboardItem, record: dict[str, Any], confi
     candidate_texts = cleanup_candidate_strings(item)
     files: dict[str, Path] = {}
     relative_candidates: list[str] = []
+    errors: list[str] = []
     for text in candidate_texts:
         path = resolve_cleanup_candidate(text, config_path)
         if path is None:
@@ -2542,13 +2668,12 @@ def delete_not_relevant_files(item: DashboardItem, record: dict[str, Any], confi
         relative = cleanup_relative_path(path, roots)
         if relative:
             relative_candidates.append(relative)
-        for candidate in iter_cleanup_files(path, roots):
+        for candidate in iter_cleanup_files(path, roots, errors):
             files[str(candidate)] = candidate
 
     deleted: list[str] = []
     deleted_relative: list[str] = []
     deleted_dirs: list[str] = []
-    errors: list[str] = []
     for path in sorted(files.values(), key=lambda value: len(value.parts), reverse=True):
         relative = cleanup_relative_path(path, roots)
         try:
@@ -2608,7 +2733,12 @@ def update_item_status(
     if status == "relevant" and item is not None:
         bitrix_result = push_item_to_bitrix(item, record, config)
     elif status == "not_relevant" and item is not None:
-        cleanup_result = delete_not_relevant_files(item, record, config, config_path)
+        try:
+            cleanup_result = delete_not_relevant_files(item, record, config, config_path)
+        except OSError as exc:
+            record["cleanup_error"] = str(exc)
+            record["files_deleted_at"] = now_iso()
+            cleanup_result = {"status": "marked", "deletedCount": 0, "deletedFiles": [], "deletedDirs": [], "errors": [str(exc)]}
 
     save_state(config, config_path, state)
     payload = dashboard_payload(config, config_path)
@@ -2859,6 +2989,42 @@ def file_is_older_than(path: Path, cutoff: dt.datetime) -> bool:
         return False
 
 
+def deadline_datetimes_from_text(text: str) -> list[dt.datetime]:
+    result: list[dt.datetime] = []
+    value = clean_text(text)
+    if not value:
+        return result
+    patterns = (
+        r"(?P<day>\d{1,2})[./-](?P<month>\d{1,2})[./-](?P<year>20\d{2})(?:\s*[T ]\s*(?P<hour>\d{1,2})[:.](?P<minute>\d{2}))?",
+        r"(?P<year>20\d{2})[./-](?P<month>\d{1,2})[./-](?P<day>\d{1,2})(?:\s*[T ]\s*(?P<hour>\d{1,2})[:.](?P<minute>\d{2}))?",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, value):
+            try:
+                hour = int(match.group("hour") or 23)
+                minute = int(match.group("minute") or 59)
+                second = 59 if not match.group("hour") else 0
+                result.append(
+                    dt.datetime(
+                        int(match.group("year")),
+                        int(match.group("month")),
+                        int(match.group("day")),
+                        hour,
+                        minute,
+                        second,
+                    )
+                )
+            except ValueError:
+                continue
+    return result
+
+
+def unchecked_item_deadline_expired(item: DashboardItem, now: dt.datetime) -> bool:
+    deadline = offer_deadline(item.columns)
+    dates = deadline_datetimes_from_text(deadline)
+    return bool(dates) and max(dates) < now
+
+
 def prune_empty_download_dirs(start: Path) -> None:
     current = start
     stop: Path | None = None
@@ -2898,6 +3064,9 @@ def cleanup_downloaded_files(config: dict[str, Any], config_path: Path) -> dict[
         status = state_record_status(record)
         if status in {"relevant", "submitting"}:
             skipped.append(item.id)
+            continue
+        if status == "unchecked" and not unchecked_item_deadline_expired(item, now):
+            skipped.append(f"{item.id}: unchecked_deadline_not_expired")
             continue
         item_cutoff = unprocessed_cutoff if status == "unchecked" else cutoff
         deleted_for_item: list[str] = []
@@ -3154,7 +3323,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     port = args.port or int(dash.get("port") or 8765)
     handler = make_handler(config, config_path)
     server = ThreadingHTTPServer((host, port), handler)
-    print(json.dumps({"dashboard_url": f"http://{host}:{port}/", "config": str(config_path.resolve())}, ensure_ascii=False))
+    try:
+        print(json.dumps({"dashboard_url": f"http://{host}:{port}/", "config": str(config_path.resolve())}, ensure_ascii=False))
+    except (AttributeError, OSError):
+        pass
     try:
         server.serve_forever()
     except KeyboardInterrupt:
